@@ -1,0 +1,6 @@
+#!/bin/bash
+if [ $1 == "-e" ];
+  then
+    curl https://ipinfo.io/widget/demo/$2
+  else curl https://ipinfo.io/$1?token=$IPINFOTOKEN
+fi
