@@ -4,7 +4,7 @@ This is my collection of bash, python, and other such scripts for making my dail
 
 
 ## Variables 
-Some of these scripts make use of service endpoints and require authentication tokens. Obviously, I haven't included mine here, but I will list and identify them in the file `TOKENS.md` The expectation is that the user will create a file such as `.tokens` in their home directory and source this file from their `.profile`, `.zshrc`, `.bashrc`, or whichever one they use. The file should go something like
+Some of these scripts make use of service endpoints and require authentication tokens. Obviously, I haven't included mine here, but I will list and identify them in the file [TOKENS.md](TOKENS.md) The expectation is that the user will create a file such as `.tokens` in their home directory and source this file from their `.profile`, `.zshrc`, `.bashrc`, or whichever one they use. The file should go something like
 
 ```
 #!/bin/bash
