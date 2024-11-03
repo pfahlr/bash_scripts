@@ -1,0 +1,72 @@
+#!/bin/python3
+#------------------------------------------------------------------------------ 
+#
+# GENERATE n LETTER/NUMBER DOMAIN NAMES
+# 
+# RICK PFAHL <pfahlr@gmail.com>
+# 16 MAY 2024
+#
+# OPTIONS:
+# --length 		| -n	: Length of the domain name
+# --include-digits	| -d	: Include 0-9 if set
+# --include-chars	| -c	: Include '-' if set
+# --long		| -l	: Print each domain on a newline if set
+#
+#------------------------------------------------------------------------------
+
+
+import itertools
+import string
+import sys
+import argparse
+
+def generate_domain_permutations(n, include_digits=False, include_chars=False):
+    # Generate the character set based on the provided flags
+    lowercase  = string.ascii_lowercase
+    if include_digits:
+        digits = string.digits
+    else: 
+        digits = ''
+    if include_chars:
+        characters = '-.'
+    else:
+        characters = ''
+    # Generate all possible permutations of domain names of length n
+    permutations = itertools.product(lowercase+digits+characters, repeat=n)
+
+    # Convert tuples to string
+    domain_names = [''.join(p) for p in permutations]
+
+    return domain_names
+
+def main():
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description="Generate domain name permutations.")
+    parser.add_argument('--length', '-n', type=int, default=3, help="Length of the domain name permutations (default: 3)")
+    parser.add_argument('--include-digits', '-d', action='store_true', help="Include digits in the permutations")
+    parser.add_argument('--include-chars', '-c', action='store_true', help="Include special characters in the permutations")
+    parser.add_argument('--long', '-l', action='store_true', help="Print each domain on a newline")
+    # Parse arguments
+    args = parser.parse_args()
+
+    # Validate the length argument
+    if args.length < 1 or args.length > 20:
+        print("The value of --length must be between 1 and 20.")
+        sys.exit(1)
+
+    # Generate domain permutations
+    domain_names = generate_domain_permutations(args.length, args.include_digits, args.include_chars)
+
+    # Print each domain name
+    counter = 1
+    output = ''
+    for domain in domain_names:
+        if args.long:
+            output += domain+'\n'
+        else: 
+            output += domain+' '
+    print(output)
+
+if __name__ == "__main__":
+    main()
+

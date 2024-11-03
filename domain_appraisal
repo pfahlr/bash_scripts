@@ -1,0 +1,78 @@
+#!/bin/python3
+#----------------------------------------------------------
+#
+# Batch Appraise Domain Names 
+# (uses humbleworth.com API endpoint)
+#
+# RICK PFAHL <pfahlr@gmail.com>
+# 16 MAY 2024
+#
+#---------------------------------------------------------
+
+#
+#  usage: domain_appraisal [-h] --outfile OUTFILE [--tld TLD] input_file
+#
+
+
+
+
+import csv
+import json
+import requests
+import argparse
+import time
+
+def read_csv(file_path):
+    with open(file_path, newline='') as csvfile:
+        reader = csv.DictReader(csvfile)y
+
+        rows = [row for row in reader]
+    return rows
+
+def get_domain_names(rows, tld):
+    domain_names = [f"{row['Domain']}" for row in rows]
+    return domain_names
+
+#
+#API Documentation  https://humbleworth.com/page/about/api
+#
+
+def make_api_call(domains):
+    url = "https://valuation.humbleworth.com/api/valuation"
+    headers = {
+        "Content-Type": "application/json"
+    }
+    response = requests.post(url, headers=headers, json={"domains":domains})
+    
+    if response.status_code == 200:
+        time.sleep(1)
+        print("response:200, OK!... got 20 rows"+domains)
+        return response.json()['valuations']
+    else:
+        response.raise_for_status()
+
+def main(input_file, output_file_base, tld):
+    rows = read_csv(input_file)
+    domain_names = get_domain_names(rows, tld)
+    
+    all_valuations = []
+    
+    for i in range(0, len(domain_names), 20):
+        batch = domain_names[i:i+20]
+        valuations = make_api_call(batch)
+        all_valuations.extend(valuations)
+    
+    output_file = f"{output_file_base}.json"
+    with open(output_file, 'w') as outfile:
+        json.dump(all_valuations, outfile, indent=4)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Process CSV and get domain valuations.")
+    parser.add_argument("input_file", help="Path to the input CSV file.")
+    parser.add_argument("--outfile", "-o", required=True, help="Base name for the output file.")
+    parser.add_argument("--tld", "-d", default="com", help="Top-level domain to append.")
+    
+    args = parser.parse_args()
+    
+    main(args.input_file, args.outfile, args.tld)
+

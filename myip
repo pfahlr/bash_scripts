@@ -1,0 +1,35 @@
+#!/bin/python
+#---------------------------------------------
+# 
+# Get my IP address
+#
+# RICK PFAHL<pfahlr@gmail.com>
+# 3 NOV 2024
+#
+# OPTIONS:
+# --ipv6	| -6	: get ipv6 if set
+# --json	| -j	: output json if set
+#
+#---------------------------------------------
+
+
+import argparse
+import requests
+import json
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument('-6', "--ipv6", action=argparse.BooleanOptionalAction)
+parser.add_argument('-j', "--json", action=argparse.BooleanOptionalAction)
+args = parser.parse_args()
+
+if args.ipv6:
+  response = requests.get('https://api64.ipify.org?format=json')
+else:
+  response = requests.get('https://api.ipify.org?format=json')
+
+if args.json:
+  print(response.text)
+else:
+  data = json.loads(response.text)
+  print(data['ip'])

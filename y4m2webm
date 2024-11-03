@@ -1,0 +1,5 @@
+#!/bin/bash
+echo "converting $i.y4m to WEBM compression level $2, output file $1.webm"
+
+ffmpeg -i $1.y4m -loop 0 -q:v 100 -compression_level $2 $i.webm
+
