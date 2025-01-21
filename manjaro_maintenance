@@ -1,0 +1,94 @@
+#!/bin/bash
+pacman_update_executable="yay"
+
+runcmd () {
+  echo "running command: $1"
+  eval $1
+}
+
+returntomain () {
+  read -erp "Return to Main Menu [Y/n]:" continueinp
+  if [[ $continueinp != 'n' ]]; then
+    mainmenu
+    else 
+      exit
+  fi
+}
+
+uninstallorphans () {
+  cmd="pacman -Qdtq | sudo pacman -Rns -"
+  runcmd "$cmd"
+  returntomain
+}
+
+deletecahe () {
+  echo "deleting cache directory with size:"
+  du -sh "$HOME/.cache"
+  cmd="rm -rf $HOME/.cache"
+  runcmd "$cmd"
+  returntomain  
+}
+
+pacmanclean () {
+  cmd="sudo pacman -Scc"
+  runcmd "$cmd"
+  returntomain
+}
+
+homdiruseage () {
+  echo ""
+  echo "getting home directory usage summary"
+  timestamp="$(date +%s)"
+  tempfilename="homedirusage__$timestamp"
+  sudo du -sh $HOME/* | grep '[M,G]' > "/tmp/$tempfilename" 
+  sudo du -sh $HOME/.* | grep '[M,G]' >> "/tmp/$tempfilename"
+  less /tmp/$tempfilename
+  rm /tmp/$tempfilename
+  returntomain
+} 
+systemupdate () {
+  cmd="$pacman_update_executable -Syyu --sudoloop --noconfirm"
+  echo $cmd 
+  $cmd
+}
+
+mainmenu () {
+  menu="
+████████████████████████████████████████████████████████████████████████████████
+█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█
+█▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▓█
+█▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓█
+█▓░                                                                          ░▓█
+█▓░ (1) Uninstall Orphaned Packages    (2) Run pacman/yay clean              ░▓█
+█▓░ (3) Delete Cache                   (4) Summarize Home Directory Usage    ░▓█
+█▓░ (5) Update System                                                        ░▓█
+█▓░ (Q) EXIT                                                                 ░▓█
+█▓░                                                                          ░▓█
+█▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓█
+█▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▓█
+█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█
+████████████████████████████████████████████████████████████████████████████████
+"
+  echo -e "${menu}"
+  read -n 1 -p "Input Selection:" mainmenuinput
+  echo ""
+  if [ "$mainmenuinput" = "1" ]; then
+      uninstallorphans
+    elif [ "$mainmenuinput" = "2" ]; then
+      pacmanclean
+    elif [ "$mainmenuinput" = "3" ]; then
+      deletecahe
+    elif [ "$mainmenuinput" = "4" ]; then
+      homdiruseage
+    elif [ "$mainmenuinput" = "5" ]; then
+      systemupdate      
+    elif [ "$mainmenuinput" = "Q" ]; then
+      exit
+    elif [ "$mainmenuinput" = "q" ]; then
+      exit
+
+  fi
+  mainmenu
+}
+
+mainmenu
