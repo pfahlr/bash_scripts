@@ -1,0 +1,44 @@
+#!/bin/python
+
+###############################################################################
+# script name: sort_list_alpha
+# description: sorts a line break delimited list of strings alphabetically
+# language: python
+# author: Rick Pfahl
+# date: 22 Jan 2025
+###############################################################################
+
+import argparse
+import sys
+
+def sort_words(input_source, reverse):
+    try:
+        # Read input: from file if specified, otherwise from standard input
+        if input_source:
+            with open(input_source, 'r') as file:
+                words = file.read().splitlines()
+        else:
+            print("Enter words (Ctrl+D or Ctrl+Z to end input):")
+            words = sys.stdin.read().splitlines()
+
+        # Sort words alphabetically or reverse-alphabetically
+        sorted_words = sorted(words, reverse=reverse)
+
+        # Print sorted words
+        for word in sorted_words:
+            print(word)
+    except FileNotFoundError:
+        print(f"Error: File '{input_source}' not found.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Sort words alphabetically or reverse-alphabetically.")
+    parser.add_argument("--infile", "-f", type=str, metavar="FILE",
+                        help="Input file containing words (leave blank for standard input).")
+    parser.add_argument("--reverse", "-r", action="store_true",
+                        help="Sort words in reverse alphabetical order.")
+
+    args = parser.parse_args()
+
+    sort_words(args.infile, args.reverse)
