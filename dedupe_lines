@@ -1,0 +1,40 @@
+#!/bin/python3
+
+import sys
+import argparse
+
+def dedupe_and_sort(input_lines, sort=False):
+    # Remove duplicates using a set
+    unique_lines = set(input_lines)
+
+    # Convert to list for sorting or consistent output
+    result = list(unique_lines)
+    if sort:
+        result.sort()
+    
+    return result
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Deduplicate lines from stdin, with optional alphabetical sorting."
+    )
+    parser.add_argument(
+        "--sort", 
+        action="store_true", 
+        help="Sort the deduplicated lines alphabetically."
+    )
+    
+    args = parser.parse_args()
+
+    # Read from stdin and strip whitespace
+    input_lines = sys.stdin.read().strip().splitlines()
+
+    # Process the lines
+    result = dedupe_and_sort(input_lines, sort=args.sort)
+
+    # Print the output
+    for line in result:
+        print(line)
+
+if __name__ == "__main__":
+    main()
