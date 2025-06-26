@@ -1,0 +1,38 @@
+#!/bin/bash
+# default to ~/.ssh/id_rsa
+keyfile="$HOME/.ssh/id_rsa"
+# default to md5
+hashtype_cli_opt='md5'
+while getopts "s:" opt; do
+  case ${opt} in
+    s)
+      case ${OPTARG} in
+        'md5')
+          hashtype_cli_opt='md5'
+          ;;
+        'sha256')
+          hashtype_cli_opt='sha256'
+          ssh-keygen -lf $1 -E sha256
+          ;;
+      esac
+      ;;
+    :)
+      echo "Option -${OPTARG} requires a valid argment. md5 and sha256 are currently supported."
+      ;;
+    f)
+      if [[ -n ${OPTARG} && -f ${OPTARG} ]]; then
+        keyfile=${OPTARG}
+      else
+        echo "You provided an empty string or a nonexistent file, good job!"
+      fi
+      ;;
+    ?)
+      echo "Unknown argument supplied, please pass -s <value> -f <filename>"
+      ;;
+   esac
+done
+cmd="ssh-keygen -lf $keyfile -E $hashtype_cli_opt"
+echo "<<<Running command:\`$cmd\`>>>:"
+$cmd
+
+
