@@ -1,0 +1,8 @@
+#!/bin/bash
+# generate an es256 elliptic curve keypair for webapps using JWT
+
+openssl ecparam -name  prime256v1 -genkey -noout -out private.pem
+openssl ec -in private.pem -pubout -out public.pem   
+cat private.pem
+cat public.pem
+
