@@ -1,5 +1,10 @@
 #!/usr/bin/python3
-
+#
+# Extract domains or links from a markdown file
+#
+# 2025 - Rick Pfahl <pfahlr@gmail.com>
+#
+#
 import argparse
 import re
 from urllib.parse import urlparse

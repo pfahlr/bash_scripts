@@ -1,0 +1,101 @@
+#!/usr/bin/python3
+# 
+# Deduplicate lines in a text file or input stream
+# 
+# 2025 - Rick Pfahl <pfahlr@gmail.com>
+#
+#
+import sys
+import argparse
+import re
+from typing import List, Dict
+
+
+def compile_mask(pattern: str):
+    """
+    Turn a mask like 'www.?' or '?.+' into regex and instructions.
+    Returns compiled regex, instructions (list of ('keep'|'ignore'|'plus')), and group count.
+    """
+    if not pattern:
+        return None, [], 0
+
+    tokens = []
+    instrs = []
+    group_count = 0
+
+    for ch in pattern:
+        if ch == '?':
+            tokens.append("(.+?)")  # keep
+            instrs.append("keep")
+            group_count += 1
+        elif ch == '*':
+            tokens.append(".*")     # ignore
+            instrs.append("ignore")
+        elif ch == '+':
+            tokens.append("(.+?)")  # like keep, but we'll only take the first occurrence
+            instrs.append("plus")
+            group_count += 1
+        else:
+            tokens.append(re.escape(ch))
+            instrs.append("lit")
+
+    regex = "^" + "".join(tokens) + "$"
+    return re.compile(regex, flags=re.IGNORECASE), instrs, group_count
+
+
+def dedup_key(domain: str, mask_re, instrs) -> str:
+    """Build dedup key based on mask instructions."""
+    if mask_re is None:
+        return domain
+
+    m = mask_re.match(domain)
+    if not m:
+        return domain
+
+    parts = []
+    g_idx = 1
+    for instr in instrs:
+        if instr == "keep":
+            parts.append(m.group(g_idx))
+            g_idx += 1
+        elif instr == "plus":
+            # Take first match only (group is captured minimally)
+            parts.append(m.group(g_idx))
+            g_idx += 1
+        # ignore and lit are dropped from key
+
+    return "".join(parts) or domain
+
+
+def choose_canonical(current: str, candidate: str) -> str:
+    """Pick a nicer representative: shorter, then lexicographically."""
+    if len(candidate) < len(current):
+        return candidate
+    if len(candidate) == len(current) and candidate < current:
+        return candidate
+    return current
+
+
+def read_domains(path: str | None) -> List[str]:
+    if path:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    else:
+        lines = sys.stdin.read().splitlines()
+    return [line.strip().lower() for line in lines if line.strip()]
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Deduplicate domain list using a mask pattern with ?, *, +"
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help="Path to text file with domains, or omit to read from stdin",
+    )
+    parser.add_argument(
+        "--pattern",
+        default=""
+
