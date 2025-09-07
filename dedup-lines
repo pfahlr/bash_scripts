@@ -97,5 +97,36 @@ def main():
     )
     parser.add_argument(
         "--pattern",
-        default=""
+        default="",
+        help=(
+            "Mask for deduplication. "
+            "'*' = ignore, '?' = keep unique, '+' = include first match only. "
+            'E.g. "www.?" dedupes www.example.com and example.com; '
+            '"?.*" dedupes example.com and example.org; '
+            '"?.+" dedupes example.com and example.org but keeps .com as canonical.'
+        ),
+    )
+    parser.add_argument("--sorted", action="store_true", help="Sort output")
+    args = parser.parse_args()
 
+    domains = read_domains(args.path)
+    mask_re, instrs, _ = compile_mask(args.pattern)
+
+    chosen: Dict[str, str] = {}
+    for d in domains:
+        key = dedup_key(d, mask_re, instrs)
+        if key in chosen:
+            chosen[key] = choose_canonical(chosen[key], d)
+        else:
+            chosen[key] = d
+
+    results = list(chosen.values())
+    if args.sorted:
+        results.sort()
+
+    for r in results:
+        print(r)
+
+
+if __name__ == "__main__":
+    main()
