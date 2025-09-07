@@ -1,0 +1,34 @@
+#!/bin/bash
+#       setjournalsize.sh
+# thank you Josef Strzibny for useful stuff here
+#
+
+# This function is used to set the limits on the system journal size.
+# By default, each journal can achieve 600+megs
+# the script is based on the article in fedoraplanet.org
+# http://nts.strzibny.name/cleaning-up-systemd-journal-logs-on-fedora/
+# 
+function cleanjournal()
+{
+sudo journalctl --disk-usage
+sleep 5
+sudo journalctl --vacuum-size=10M --vacuum-time=2d;
+sudo journalctl --rotate
+}
+#
+if [ $EUID != 0 ];then
+    echo "Best to run $0 as root"
+fi
+cleanjournal
+cleanjournal
+cleanjournal
+echo "SET SystemMaxUse=50M in /etc/systemd/journald.conf"
+echo "SET SystemMaxUse=50M in /etc/systemd/journald.conf"
+echo "SET SystemMaxUse=50M in /etc/systemd/journald.conf"
+sleep 5
+echo "Uncomment #SystemMaxUse= and set"
+echo "SystemMaxUse=50M"
+sleep 5
+
+sudo vi /etc/systemd/journald.conf
+sudo systemctl restart systemd-journald.service

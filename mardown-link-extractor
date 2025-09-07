@@ -1,0 +1,108 @@
+#!/usr/bin/python3
+
+import argparse
+import re
+from urllib.parse import urlparse
+
+# Regexes for various link forms (excluding images)
+# 1) Markdown inline links: [text](url) but not ![alt](url)
+INLINE_LINK_RE = re.compile(r'(?<!\!)\[[^\]]+\]\((\s*<?([^)\s>]+)[^)]*?)\)', re.IGNORECASE)
+
+# 2) Reference-style definitions: [id]: url
+REF_DEF_RE = re.compile(r'^\s*\[[^\]]+\]:\s*<?([^\s>]+)>?', re.IGNORECASE | re.MULTILINE)
+
+# 3) Autolinks: <http://...> or <https://...>
+AUTOLINK_RE = re.compile(r'<(https?://[^>\s]+)>', re.IGNORECASE)
+
+# 4) HTML anchors: <a href="..."> or <a href='...'>
+HTML_A_HREF_RE = re.compile(r'<a\s[^>]*?href=["\']([^"\']+)["\']', re.IGNORECASE)
+
+# Optional: raw URLs (http(s)://...) in text (not wrapped). Commented out by default.
+RAW_URL_RE = re.compile(r'(?<!["\'(<])\bhttps?://[^\s)>\]]+', re.IGNORECASE)
+
+
+def extract_urls(md_text: str, include_raw=False):
+    urls = set()
+
+    # Inline markdown links
+    for m in INLINE_LINK_RE.finditer(md_text):
+        # Group 2 should be the clean URL without surrounding <>
+        url = m.group(2)
+        if url:
+            urls.add(url.strip())
+
+    # Reference-style definitions
+    for m in REF_DEF_RE.finditer(md_text):
+        url = m.group(1)
+        if url:
+            urls.add(url.strip())
+
+    # Autolinks
+    for m in AUTOLINK_RE.finditer(md_text):
+        url = m.group(1)
+        if url:
+            urls.add(url.strip())
+
+    # HTML <a href="...">
+    for m in HTML_A_HREF_RE.finditer(md_text):
+        url = m.group(1)
+        if url:
+            urls.add(url.strip())
+
+    # Optional: detect bare URLs in text
+    if include_raw:
+        for m in RAW_URL_RE.finditer(md_text):
+            urls.add(m.group(0).strip())
+
+    # Only keep http/https
+    urls = {u for u in urls if urlparse(u).scheme in ("http", "https")}
+
+    return urls
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Extract link destinations from a Markdown file."
+    )
+    parser.add_argument("path", help="Path to the Markdown file")
+    parser.add_argument(
+        "--full-url",
+        action="store_true",
+        help="Output full unique URLs instead of unique domains",
+    )
+    parser.add_argument(
+        "--include-raw",
+        action="store_true",
+        help="Also capture bare http(s) URLs present in text (not required by Markdown).",
+    )
+    parser.add_argument(
+        "--strip-www",
+        action="store_true",
+        help="When outputting domains, strip a leading 'www.'",
+    )
+    args = parser.parse_args()
+
+    with open(args.path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    urls = extract_urls(text, include_raw=args.include_raw)
+
+    if args.full_url:
+        out_items = sorted(urls)
+    else:
+        domains = set()
+        for u in urls:
+            host = urlparse(u).netloc.lower()
+            if args.strip_www and host.startswith("www."):
+                host = host[4:]
+            if host:
+                domains.add(host)
+        out_items = sorted(domains)
+
+    for item in out_items:
+        print(item)
+
+
+if __name__ == "__main__":
+    main()
+
