@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+
+#######################################################################
+# ███████████████████████████████████████████████████████████████████ #
+# █▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█ #
+# █▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▓█ #
+# █▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓█ #
+# █▓░                                                             ░▓█ #
+# █▓░                                                             ░▓█ #
+# █▓░  |========================================================  ░▓█ #
+# █▓░  |///////////////////////////////////////////////////////|  ░▓█ #
+# █▓░  |\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\|  ░▓█ #
+# █▓░  |//////// \\///////// \\/////// \\/// \\/// \/// \\\\\\\|  ░▓█ #
+# █▓░  |/// \\/// \/// \\\\\\\/// \\/// \/// \\/// \/// \\\\\\\|  ░▓█ #
+# █▓░  |//////// \\/////// \\\///////// \///////// \/// \\\\\\\|  ░▓█ #
+# █▓░  |/// \\\\\\\/// \\\\\\\/// \\/// \/// \\/// \/// \\\\\\\|  ░▓█ #
+# █▓░  |/// \\\\\\\/// \\\\\\\/// \\/// \/// \\/// \///////// \|  ░▓█ #
+# █▓░  |\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\|  ░▓█ #
+# █▓░  |///2025 Rick Pfahl\<pfahlr@gmail.com>//////////////////|  ░▓█ #
+# █▓░  |========================================================  ░▓█ #
+# █▓░    csv_to_md_table.py                                       ░▓█ #
+# █▓░                                                             ░▓█ #
+# █▓░      Convert CSV/TSV to a Markdown table with optional      ░▓█ #
+# █▓░      link processing, alignment, empty-cell fills,          ░▓█ #
+# █▓░      optional header handling, and input CSV quoting        ░▓█ #
+# █▓░      controls. Tabs are 2 spaces.                           ░▓█ #
+# █▓░                                                             ░▓█ #
+# █▓░    2025 Rick Pfahl <pfahlr@gmail.com>                       ░▓█ #
+# █▓░                                                             ░▓█ #
+# █▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓█ #
+# █▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▓█ #
+# █▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█ #
+# ███████████████████████████████████████████████████████████████████ #
+#######################################################################
+
+
+import argparse
+import csv
+import re
+import sys
+import textwrap
+from typing import List, Callable, Optional, Tuple
+
+MD_LINK_RE = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
+HTML_A_RE = re.compile(r'<a\s+[^>]*?href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
+
+def unlink(text: str) -> str:
+  def md_sub(m): return m.group(1)
+  text = MD_LINK_RE.sub(md_sub, text)
+  def a_sub(m): return m.group(2)
+  text = HTML_A_RE.sub(a_sub, text)
+  return text
+
+def md_to_html_links(text: str) -> str:
+  def md_sub(m):
+    label, url = m.group(1), m.group(2)
+    return f'<a href="{url}">{label}</a>'
+  return MD_LINK_RE.sub(md_sub, text)
+
+def html_to_md_links(text: str) -> str:
+  def a_sub(m):
+    url, label = m.group(1), m.group(2)
+    label = label.strip()
+    return f'[{label}]({url})'
+  return HTML_A_RE.sub(a_sub, text)
+
+def escape_md_cell(s: str) -> str:
+  s = s.replace('\\', '\\\\')  # escape backslashes first
+  s = s.replace('|', r'\|')
+  s = s.replace('\r\n', '\n').replace('\r', '\n').replace('\n', '<br>')
+  return s
+
+def apply_cell_transform(s: str, transform: Optional[Callable[[str], str]]) -> str:
+  return transform(s) if transform else s
+
+def alignment_rule_from_spec(spec: str, num_cols: int) -> List[str]:
+  spec = (spec or '').strip().upper()
+  mapping = {'L': ':--', 'C': ':-:', 'R': '--:'}
+  if not spec:
+    return ['---'] * num_cols
+  chosen = []
+  for i in range(num_cols):
+    ch = spec[i] if i < len(spec) else 'L'
+    chosen.append(mapping.get(ch, ':--'))
+  return chosen
+
+def rows_to_markdown(rows: List[List[str]], align_spec: Optional[str], no_header: bool) -> str:
+  if not rows:
+    return ""
+  num_cols = max(len(r) for r in rows)
+  norm_rows = [r + [''] * (num_cols - len(r)) for r in rows]
+
+  if no_header:
+    header = [f'Col{i+1}' for i in range(num_cols)]
+    body = norm_rows
+  else:
+    header = norm_rows[0]
+    body = norm_rows[1:]
+
+  align_cells = alignment_rule_from_spec(align_spec or '', num_cols)
+  header_line = '| ' + ' | '.join(header) + ' |'
+  sep_line = '| ' + ' | '.join(align_cells) + ' |'
+  body_lines = ['| ' + ' | '.join(r) + ' |' for r in body]
+  return '\n'.join([header_line, sep_line] + body_lines) + '\n'
+
+def split_empty_spec(spec: str) -> List[str]:
+  if spec is None:
+    return []
+  parts = re.split(r'(?<!\\),', spec)
+  cleaned = []
+  for p in parts:
+    p = p.replace(r'\,', ',').replace(r'\\', '\\').strip()
+    cleaned.append(p)
+  return cleaned
+
+def expand_empty_fills(spec: Optional[str], num_cols: int) -> List[Optional[str]]:
+  if spec is None:
+    return [None] * num_cols
+  parts = split_empty_spec(spec)
+  if len(parts) == 0:
+    return [None] * num_cols
+  if len(parts) == 1:
+    return [parts[0]] * num_cols
+  out: List[Optional[str]] = []
+  for i in range(num_cols):
+    val = parts[i] if i < len(parts) else parts[-1]
+    out.append(val)
+  return out
+
+def csv_dialect_from_args(tsv: bool, quote: str) -> Tuple[str, dict]:
+  """
+  Returns (delimiter, reader_kwargs) for csv.reader based on --tsv and --quote.
+  """
+  delimiter = '\t' if tsv else ','
+  q = (quote or 'minimal').lower()
+  if q == 'none':
+    # QUOTE_NONE requires an escapechar to read fields that include delimiter/quotechar
+    return delimiter, dict(quoting=csv.QUOTE_NONE, escapechar='\\')
+  if q == 'all':
+    return delimiter, dict(quoting=csv.QUOTE_ALL)
+  if q == 'nonnumeric':
+    return delimiter, dict(quoting=csv.QUOTE_NONNUMERIC)
+  # default minimal
+  return delimiter, dict(quoting=csv.QUOTE_MINIMAL)
+
+def main():
+  script = sys.argv[0]
+  examples = textwrap.dedent(f"""\
+    Examples:
+      # CSV → MD, leave links as-is, default alignment
+      python {script} --in input.csv --out table.md
+
+      # TSV → MD, strip all link markup
+      python {script} --tsv --unlink --in data.tsv --out table.md
+
+      # Convert only Markdown links → HTML <a>
+      python {script} --htmlink --in input.csv --out table.md
+
+      # Convert only HTML <a> → Markdown links
+      python {script} --mdlink --in input.csv --out table.md
+
+      # CSV → MD with alignment: L L C R R L L
+      python {script} --align LLCRRLL --in input.csv --out table.md
+
+      # Fill all empty cells with 'N/A'
+      python {script} --empty "N/A" --in input.csv --out table.md
+
+      # Per-column empty fills (A, B, then reuse B for remaining columns)
+      python {script} --empty "A,B" --in input.csv --out table.md
+
+      # No header in data; synthesize Col1..ColN
+      python {script} --no-header --in data.csv --out table.md
+
+      # Input quoting control (CSV with no quoting; backslash escapes)
+      python {script} --quote none --in raw.csv --out table.md
+  """)
+
+  parser = argparse.ArgumentParser(
+    description="Convert CSV/TSV to a Markdown table with link processing, alignment, empty-cell fills,\n"
+                "optional header handling, and input CSV quoting controls.",
+    epilog=examples,
+    formatter_class=argparse.RawDescriptionHelpFormatter
+  )
+
+  parser.add_argument('--in', dest='infile', required=True, help='Path to input CSV/TSV file')
+  parser.add_argument('--out', dest='outfile', required=True, help='Path to output Markdown file')
+
+  group = parser.add_mutually_exclusive_group()
+  group.add_argument('--unlink', action='store_true', help='Remove Markdown/HTML linking, keep only link text')
+  group.add_argument('--htmlink', action='store_true', help='Convert Markdown links to HTML <a> tags; leave HTML links alone')
+  group.add_argument('--mdlink', action='store_true', help='Convert HTML <a> links to Markdown; leave Markdown links as-is')
+
+  parser.add_argument('--tsv', action='store_true', help='Parse as tab separated values (default: CSV)')
+  parser.add_argument('--align', type=str, default=None,
+                      help="Alignment spec per column, e.g. 'LLCRR' (L=left, C=center, R=right)")
+  parser.add_argument('--empty', type=str, default=None,
+                      help="Value or comma-separated values to substitute for empty cells. "
+                           "Single value applies to all columns; multiple apply per column left→right. "
+                           "Escape commas within a value as '\\,'.")
+  parser.add_argument('--no-header', action='store_true',
+                      help='Treat the first row as body data and synthesize a header (Col1..ColN).')
+  parser.add_argument('--quote', type=str, default='minimal',
+                      choices=['none', 'minimal', 'nonnumeric', 'all'],
+                      help="Input CSV quoting style (default: minimal). "
+                           "Use 'none' for unquoted CSV/TSV with backslash escapes.")
+
+  args = parser.parse_args()
+
+  delimiter, reader_kwargs = csv_dialect_from_args(args.tsv, args.quote)
+
+  transform: Optional[Callable[[str], str]] = None
+  if args.unlink:
+    transform = unlink
+  elif args.htmlink:
+    transform = md_to_html_links
+  elif args.mdlink:
+    transform = html_to_md_links
+
+  raw_rows: List[List[str]] = []
+  with open(args.infile, 'r', newline='', encoding='utf-8') as f:
+    reader = csv.reader(f, delimiter=delimiter, **reader_kwargs)
+    for row in reader:
+      raw_rows.append(row)
+
+  if not raw_rows:
+    with open(args.outfile, 'w', encoding='utf-8') as out_f:
+      out_f.write("")
+    return
+
+  num_cols = max(len(r) for r in raw_rows)
+  empty_fills = expand_empty_fills(args.empty, num_cols)
+
+  rows: List[List[str]] = []
+  for row in raw_rows:
+    padded = row + [''] * (num_cols - len(row))
+    processed = []
+    for ci, cell in enumerate(padded):
+      cell = apply_cell_transform(cell, transform)
+      if (cell.strip() == '') and (empty_fills[ci] is not None):
+        cell = empty_fills[ci]
+      cell = escape_md_cell(cell)
+      processed.append(cell)
+    rows.append(processed)
+
+  md = rows_to_markdown(rows, args.align, args.no_header)
+
+  with open(args.outfile, 'w', encoding='utf-8') as f:
+    f.write(md)
+
+if __name__ == '__main__':
+  main()
