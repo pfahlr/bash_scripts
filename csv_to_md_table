@@ -217,10 +217,14 @@ def main():
     transform = html_to_md_links
 
   raw_rows: List[List[str]] = []
-  with open(args.infile, 'r', newline='', encoding='utf-8') as f:
-    reader = csv.reader(f, delimiter=delimiter, **reader_kwargs)
-    for row in reader:
-      raw_rows.append(row)
+  try:
+    with open(args.infile, 'r', newline='', encoding='utf-8') as f:
+      reader = csv.reader(f, delimiter=delimiter, **reader_kwargs)
+      for row in reader:
+        raw_rows.append(row)
+  except Exception as e:
+     print(f"{e}")
+     exit(0)
 
   if not raw_rows:
     with open(args.outfile, 'w', encoding='utf-8') as out_f:

@@ -1,0 +1,366 @@
+#!/usr/bin/python3
+#
+# Prune HTML Files
+#
+# Walk a directory, find text (non-binary) files, estimate HTML ratio, and (optionally) delete files above a threshold.
+# 
+# 2025 Rick Pfahl
+#
+##################
+import argparse
+import csv
+import fnmatch
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+from typing import Iterable, Optional, Tuple
+
+# ----- Optional deps -----
+try:
+  import magic  # python-magic
+except Exception:
+  magic = None
+
+try:
+  from bs4 import BeautifulSoup  # beautifulsoup4
+except Exception:
+  BeautifulSoup = None
+
+# ----- Config -----
+DEFAULT_EXCLUDES = [
+  ".git", ".hg", ".svn",
+  "node_modules", ".venv",
+  "__pycache__", ".next",
+  "dist", "build", ".cache",
+]
+
+TEXT_CHARSET = set("\t\n\r\b\f" + "".join(chr(i) for i in range(32, 127)))
+for i in range(160, 256):
+  TEXT_CHARSET.add(chr(i))
+
+TAG_RE = re.compile(r"<[A-Za-z!/][^>]*>")
+WHITESPACE_RE = re.compile(r"\s+")
+
+
+# ----- Utilities -----
+def is_probably_binary(path: Path, sample_bytes: int = 65536) -> bool:
+  try:
+    with open(path, "rb") as f:
+      chunk = f.read(sample_bytes)
+  except Exception:
+    # unreadable -> treat as binary so it can be handled
+    return True
+
+  # Prefer python-magic if available
+  if magic is not None:
+    try:
+      m = magic.Magic(mime=True)
+      mime = (m.from_buffer(chunk) or "").lower()
+      if mime.startswith("text/"):
+        return False
+      if mime in ("application/json", "application/xml", "application/xhtml+xml", "application/javascript"):
+        return False
+      # many binaries, images, archives, etc.
+      return True
+    except Exception:
+      pass
+
+  # Fallback heuristics
+  if b"\x00" in chunk:
+    return True
+
+  text = chunk.decode("utf-8", errors="ignore")
+  if not text:
+    return True
+  printable = sum(1 for ch in text if ch in TEXT_CHARSET)
+  ratio = printable / max(1, len(text))
+  return ratio < 0.70
+
+
+def read_text(path: Path, max_bytes: Optional[int]) -> str:
+  try:
+    data = path.read_bytes() if max_bytes is None else path.read_bytes()[:max_bytes]
+  except Exception:
+    return ""
+  return data.decode("utf-8", errors="replace")
+
+
+def html_ratio_regex(s: str) -> float:
+  if not s:
+    return 0.0
+  tag_chars = 0
+  for m in TAG_RE.finditer(s):
+    tag_chars += (m.end() - m.start())
+  nonspace_len = len(WHITESPACE_RE.sub("", s))
+  if nonspace_len == 0:
+    return 0.0
+  return tag_chars / nonspace_len
+
+
+def html_ratio_bs4(s: str) -> Optional[float]:
+  if BeautifulSoup is None or not s:
+    return None
+  try:
+    original = WHITESPACE_RE.sub("", s)
+    if not original:
+      return 0.0
+    soup = BeautifulSoup(s, "html.parser")
+    text_only = soup.get_text() or ""
+    text_only_ns = WHITESPACE_RE.sub("", text_only)
+    markup_len = max(0, len(original) - len(text_only_ns))
+    return markup_len / len(original)
+  except Exception:
+    return None
+
+
+def should_skip_dir(dirname: str, excludes: Iterable[str], include_hidden: bool) -> bool:
+  if not include_hidden and dirname.startswith("."):
+    return True
+  return dirname in excludes
+
+
+def any_glob_match(name: str, patterns: Iterable[str]) -> bool:
+  return any(fnmatch.fnmatch(name, pat) for pat in patterns)
+
+
+def iter_files(root: Path,
+               excludes: Iterable[str],
+               include_hidden: bool,
+               exclude_globs: Iterable[str]) -> Iterable[Path]:
+  for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if not should_skip_dir(d, excludes, include_hidden)]
+    for fn in filenames:
+      if not include_hidden and fn.startswith("."):
+        continue
+      if exclude_globs and any_glob_match(fn, exclude_globs):
+        continue
+      yield Path(dirpath) / fn
+
+
+def ensure_parent(dest_path: Path) -> None:
+  dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def guard_parallel(src_root: Path, dest_root: Path) -> None:
+  # Prevent placing dest inside source or vice-versa
+  try:
+    src_r = src_root.as_posix().rstrip("/") + "/"
+    dest_r = dest_root.as_posix().rstrip("/") + "/"
+    if dest_r.startswith(src_r):
+      raise ValueError("Destination would be inside source")
+    if src_r.startswith(dest_r):
+      raise ValueError("Source is inside destination")
+  except Exception as e:
+    raise e
+
+
+# ----- Classification -----
+def classify_file(path: Path,
+                  sample_bytes: int,
+                  max_text_read_bytes: Optional[int],
+                  html_threshold: float,
+                  large_threshold_bytes: Optional[int]) -> Tuple[str, float]:
+  """
+  Returns (class, metric)
+    class ∈ {"binary", "html", "text"}
+    metric: for html/text -> effective html ratio; for binary -> 1.0 (placeholder)
+  """
+  try:
+    st = path.stat()
+  except Exception:
+    # unreadable; treat as binary to get it out of the way
+    return "binary", 1.0
+
+  # Large files can be treated as binary candidates (optional)
+  if large_threshold_bytes is not None and st.st_size >= large_threshold_bytes:
+    return "binary", 1.0
+
+  # Binary detection
+  try:
+    if is_probably_binary(path, sample_bytes=sample_bytes):
+      return "binary", 1.0
+  except Exception:
+    return "binary", 1.0
+
+  # Text-like: compute HTML ratio
+  s = read_text(path, max_bytes=max_text_read_bytes)
+  if not s.strip():
+    # empty text → consider "text" with 0 ratio
+    return "text", 0.0
+
+  r_regex = html_ratio_regex(s)
+  r_bs4 = html_ratio_bs4(s)
+  r_eff = max(r_regex, r_bs4) if r_bs4 is not None else r_regex
+
+  if r_eff > html_threshold:
+    return "html", r_eff
+  return "text", r_eff
+
+
+# ----- Main -----
+def main():
+  ap = argparse.ArgumentParser(
+    description="Classify files as binary/html/text and move/delete per type. Dry-run by default."
+  )
+  ap.add_argument("directory", help="Root directory to scan")
+  # Actions per type
+  ap.add_argument("--move-binary", action="store_true", help="Move matched binary files")
+  ap.add_argument("--delete-binary", action="store_true", help="Delete matched binary files")
+  ap.add_argument("--move-html", action="store_true", help="Move matched HTML-heavy files")
+  ap.add_argument("--delete-html", action="store_true", help="Delete matched HTML-heavy files")
+  ap.add_argument("--move-text", action="store_true", help="Move matched plain text files")
+  ap.add_argument("--delete-text", action="store_true", help="Delete matched plain text files")
+  # Destinations
+  ap.add_argument("--binary-base-directory", type=str, default=None, help="Base dir for moved binary files")
+  ap.add_argument("--html-base-directory", type=str, default=None, help="Base dir for moved html files")
+  ap.add_argument("--text-base-directory", type=str, default=None, help="Base dir for moved text files")
+  ap.add_argument("--moved-base-directory", type=str, default=None,
+                  help="Fallback base move dir for all types; default is sibling '<SOURCE>-moved'")
+  # Detection / thresholds
+  ap.add_argument("--html-threshold", type=float, default=0.20, help="HTML ratio threshold (default 0.20)")
+  ap.add_argument("--move-large-over-mb", type=float, default=None,
+                  help="Treat files >= this size as binary candidates")
+  ap.add_argument("--sample-bytes", type=int, default=65536, help="Bytes to sample for binary detection")
+  ap.add_argument("--max-text-read-mb", type=float, default=10.0,
+                  help="Limit bytes read for HTML ratio (per file). Default 10MB")
+  # Scanning
+  ap.add_argument("--include-hidden", action="store_true", help="Include dotfiles and dot-directories")
+  ap.add_argument("--exclude-glob", action="append", default=[], help="Glob(s) to exclude")
+  ap.add_argument("--no-default-excludes", action="store_true", help="Do not skip common dirs like .git, node_modules")
+  # Logging
+  ap.add_argument("--csv-log", type=str, default=None, help="Write a CSV log of actions to this path")
+
+  args = ap.parse_args()
+
+  src_root = Path(args.directory).resolve()
+  if not src_root.is_dir():
+    print(f"ERROR: {src_root} is not a directory", file=sys.stderr)
+    sys.exit(2)
+
+  # Determine default moved base
+  default_moved_base = Path(args.moved_base_directory).resolve() if args.moved_base_directory \
+    else src_root.with_name(src_root.name + "-moved")
+
+  # Per-type base dirs (fall back to default moved base)
+  binary_base = Path(args.binary_base_directory).resolve() if args.binary_base_directory else default_moved_base
+  html_base = Path(args.html_base_directory).resolve() if args.html_base_directory else default_moved_base
+  text_base = Path(args.text_base_directory).resolve() if args.text_base_directory else default_moved_base
+
+  # Guard against nesting accidents for any base we might use
+  for base in set([binary_base, html_base, text_base]):
+    try:
+      guard_parallel(src_root, base)
+    except Exception as e:
+      print(f"ERROR: Bad destination '{base}': {e}", file=sys.stderr)
+      sys.exit(2)
+
+  excludes = [] if args.no_default_excludes else list(DEFAULT_EXCLUDES)
+  large_threshold_bytes = int(args.move_large_over_mb * 1024 * 1024) if args.move_large_over_mb else None
+  max_text_read_bytes = int(args.max_text_read_mb * 1024 * 1024) if args.max_text_read_mb else None
+
+  # CSV log setup
+  csv_writer = None
+  fcsv = None
+  if args.csv_log:
+    fcsv = open(args.csv_log, "w", newline="", encoding="utf-8")
+    csv_writer = csv.writer(fcsv)
+    csv_writer.writerow(["path", "class", "metric_html_ratio", "action", "dest"])
+
+  total = 0
+  acted = 0
+  kept = 0
+  ignored = 0
+  errors = 0
+
+  def log_csv(path: Path, cls: str, metric: float, action: str, dest: Optional[Path]):
+    if csv_writer:
+      csv_writer.writerow([str(path), cls, f"{metric:.4f}" if cls != "binary" else "", action, str(dest) if dest else ""])
+
+  for path in iter_files(src_root, excludes, args.include_hidden, args.exclude_glob):
+    total += 1
+    try:
+      cls, metric = classify_file(
+        path,
+        sample_bytes=args.sample_bytes,
+        max_text_read_bytes=max_text_read_bytes,
+        html_threshold=args.html_threshold,
+        large_threshold_bytes=large_threshold_bytes
+      )
+    except Exception as e:
+      print(f"🚫 {path} (classify error: {e})")
+      errors += 1
+      log_csv(path, "error", 0.0, "ERROR_CLASSIFY", None)
+      continue
+
+    # Decide action by class
+    if cls == "binary":
+      do_move = args.move_binary
+      do_delete = args.delete_binary
+      dest_base = binary_base
+    elif cls == "html":
+      do_move = args.move_html
+      do_delete = args.delete_html
+      dest_base = html_base
+    else:  # "text"
+      do_move = args.move_text
+      do_delete = args.delete_text
+      dest_base = text_base
+
+    rel = None
+    if do_move:
+      # compute destination
+      rel = path.relative_to(src_root)
+      dest_path = (dest_base / rel)
+      try:
+        ensure_parent(dest_path)
+        shutil.move(str(path), str(dest_path))
+        print(f"📦 {path} → {dest_path} ({cls})")
+        acted += 1
+        log_csv(path, cls, metric, "MOVED", dest_path)
+      except Exception as e:
+        print(f"🚫 {path} (move failed: {e})")
+        errors += 1
+        log_csv(path, cls, metric, "MOVE_FAILED", None)
+      continue
+
+    if do_delete:
+      try:
+        os.remove(path)
+        print(f"❌ {path} (deleted, {cls})")
+        acted += 1
+        log_csv(path, cls, metric, "DELETED", None)
+      except Exception as e:
+        print(f"🚫 {path} (delete failed: {e})")
+        errors += 1
+        log_csv(path, cls, metric, "DELETE_FAILED", None)
+      continue
+
+    # No action for this type → just note
+    print(f"💤 {path} (matched {cls}, no action)")
+    ignored += 1
+    log_csv(path, cls, metric, "MATCHED_NO_ACTION", None)
+
+  # Wrap up
+  if fcsv:
+    fcsv.close()
+
+  print("\nSummary")
+  print(f"  Source:  {src_root}")
+  print(f"  Default moved base: {default_moved_base}")
+  if binary_base != default_moved_base:
+    print(f"  Binary base: {binary_base}")
+  if html_base != default_moved_base:
+    print(f"  HTML base:   {html_base}")
+  if text_base != default_moved_base:
+    print(f"  Text base:   {text_base}")
+  print(f"  Files scanned: {total}")
+  print(f"  Actions taken: {acted}")
+  print(f"  Matched/no action: {ignored}")
+  print(f"  Kept (unseen here because everything is classified): {kept}")
+  print(f"  Errors: {errors}")
+
+
+if __name__ == "__main__":
+  main()

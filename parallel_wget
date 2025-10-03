@@ -1,0 +1,8 @@
+#/bin/bash
+
+linksfile=$1
+
+cat $linksfile | parallel -n 6 wget {}
+
+
+

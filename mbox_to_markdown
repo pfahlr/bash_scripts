@@ -1,0 +1,426 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+mbox_to_doc.py
+---------------
+Convert an mbox to one large Markdown file with embedded images.
+Attachments (including base64) are decoded and saved to an assets directory.
+Optionally generates a PDF if WeasyPrint, Pandoc, or wkhtmltopdf is available.
+
+Usage
+-----
+python mbox_to_doc.py input.mbox --out out.md
+python mbox_to_doc.py input.mbox --out out.md --assets-dir out_assets
+# also try to make a PDF next to the MD (out.pdf):
+python mbox_to_doc.py input.mbox --out out.md --pdf
+
+Notes
+-----
+- Images (image/*) are embedded in Markdown using relative paths.
+- Other attachments are exported and linked.
+- HTML bodies are converted to Markdown if `markdownify` or `html2text` is installed.
+  Otherwise, a simple HTML→text fallback is used.
+- PDF generation (optional) tries WeasyPrint first, then Pandoc, then wkhtmltopdf.
+"""
+
+import argparse
+import base64
+import datetime as dt
+import email
+import html
+import mailbox
+import mimetypes
+import os
+import re
+import shutil
+import sys
+from email.header import decode_header, make_header
+from email.utils import parsedate_to_datetime, getaddresses
+from pathlib import Path
+from typing import Dict, Optional, Tuple
+
+# ---------- helpers ----------
+
+def ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+def now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+
+def sanitize_filename(name: str, default: str) -> str:
+    if not name:
+        name = default
+    # Drop directory components & unsafe chars
+    name = os.path.basename(name)
+    name = re.sub(r"[^\w.\-+=@() ]+", "_", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name or default
+
+def decode_hdr(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    try:
+        return str(make_header(decode_header(value)))
+    except Exception:
+        # best effort fallback
+        return value
+
+def decode_bytes(data: bytes, charset: Optional[str]) -> str:
+    # Try declared charset, fall back
+    if charset:
+        try:
+            return data.decode(charset, errors="replace")
+        except Exception:
+            pass
+    for cs in ("utf-8", "latin-1", "windows-1252"):
+        try:
+            return data.decode(cs, errors="replace")
+        except Exception:
+            continue
+    # last resort
+    return data.decode("utf-8", errors="replace")
+
+def guess_ext(content_type: str) -> str:
+    ext = mimetypes.guess_extension(content_type.split(";")[0].strip()) or ""
+    # Prefer .jpg over .jpe, etc.
+    return {".jpe": ".jpg"}.get(ext, ext)
+
+def is_image(content_type: str) -> bool:
+    return content_type.lower().startswith("image/")
+
+def list_addresses(header_val: str) -> str:
+    if not header_val:
+        return ""
+    addrs = [f"{n} <{a}>" if n else a for n, a in getaddresses([header_val])]
+    return ", ".join(addrs)
+
+# HTML → Markdown (best-effort with graceful fallback)
+def html_to_markdown(html_text: str) -> str:
+    # Prefer markdownify or html2text if available
+    try:
+        import markdownify
+        return markdownify.markdownify(html_text, heading_style="ATX")
+    except Exception:
+        pass
+    try:
+        import html2text
+        h2t = html2text.HTML2Text()
+        h2t.body_width = 0
+        h2t.ignore_links = False
+        return h2t.handle(html_text)
+    except Exception:
+        pass
+    # Minimal fallback: strip tags and unescape
+    from html.parser import HTMLParser
+    class Stripper(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.buf = []
+        def handle_data(self, d): self.buf.append(d)
+        def handle_entityref(self, name): self.buf.append(html.unescape(f"&{name};"))
+        def handle_charref(self, name): self.buf.append(html.unescape(f"&#{name};"))
+    s = Stripper()
+    s.feed(html_text)
+    return "\n".join(line.rstrip() for line in "".join(s.buf).splitlines()).strip()
+
+def replace_cid_urls(html_text: str, cid_map: Dict[str, str]) -> str:
+    # Replace src="cid:..."/url('cid:...') with relative file paths
+    def repl(m):
+        cid = m.group("cid").strip("<>")
+        path = cid_map.get(cid) or cid_map.get(f"<{cid}>")
+        return path or m.group(0)
+    return re.sub(r"cid:(?P<cid>[^\"')>\s]+)", repl, html_text, flags=re.I)
+
+def write_bytes(path: Path, data: bytes) -> None:
+    ensure_dir(path.parent)
+    with open(path, "wb") as f:
+        f.write(data)
+
+
+
+# ---------- core extraction ----------
+
+def extract_attachments_and_bodies(msg: email.message.Message, assets_dir: Path, msg_idx: int) -> Tuple[str, str, Dict[str, str], list]:
+    """
+    Returns (text_plain, text_html, cid_map, saved_attachments)
+    saved_attachments: list of (filepath_str, is_image_bool, display_name)
+    """
+    text_plain, text_html = None, None
+    cid_map: Dict[str, str] = {}
+    saved = []
+
+    att_counter = 0
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_maintype() == "multipart":
+                continue
+
+            ctype = part.get_content_type()
+            disp = (part.get_content_disposition() or "").lower()
+            cid = (part.get("Content-ID") or "").strip()
+
+            # body parts
+            if ctype == "text/plain" and text_plain is None:
+                payload = part.get_payload(decode=True) or b""
+                text_plain = decode_bytes(payload, part.get_content_charset())
+                continue
+            if ctype == "text/html" and text_html is None:
+                payload = part.get_payload(decode=True) or b""
+                text_html = decode_bytes(payload, part.get_content_charset())
+                continue
+
+            # attachments or inline binaries (including inline images)
+            if disp in ("attachment", "inline") or (not ctype.startswith("text/")):
+                raw = part.get_payload(decode=True)
+                if raw is None:
+                    continue
+                att_counter += 1
+                filename = decode_hdr(part.get_filename() or "")
+                if not filename:
+                    filename = f"attachment-{msg_idx:04d}-{att_counter:02d}{guess_ext(ctype) or '.bin'}"
+                filename = sanitize_filename(filename, f"attachment-{msg_idx:04d}-{att_counter:02d}.bin")
+                out_path = assets_dir / filename
+
+                # ensure unique
+                base, ext = os.path.splitext(filename)
+                i = 2
+                while out_path.exists():
+                    out_path = assets_dir / f"{base}({i}){ext}"
+                    i += 1
+
+                write_bytes(out_path, raw)
+                rel_path = os.path.relpath(out_path, assets_dir.parent)
+
+                if cid:
+                    # Map both with and without angle brackets
+                    cid_map[cid.strip("<>")] = rel_path
+                    cid_map[cid] = rel_path
+
+                saved.append((rel_path, is_image(ctype), filename))
+    else:
+        # single-part message
+        ctype = msg.get_content_type()
+        if ctype == "text/plain":
+            payload = msg.get_payload(decode=True) or b""
+            text_plain = decode_bytes(payload, msg.get_content_charset())
+        elif ctype == "text/html":
+            payload = msg.get_payload(decode=True) or b""
+            text_html = decode_bytes(payload, msg.get_content_charset())
+
+    return text_plain or "", text_html or "", cid_map, saved
+
+def render_message_markdown(msg: email.message.Message, msg_idx: int, assets_dir: Path) -> Tuple[str, list]:
+    t_plain, t_html, cid_map, saved = extract_attachments_and_bodies(msg, assets_dir, msg_idx)
+
+    subject = decode_hdr(msg.get("Subject"))
+    from_ = list_addresses(decode_hdr(msg.get("From")))
+    to_ = list_addresses(decode_hdr(msg.get("To") or ""))
+    cc_ = list_addresses(decode_hdr(msg.get("Cc") or ""))
+    bcc_ = list_addresses(decode_hdr(msg.get("Bcc") or ""))
+
+    # Date normalize
+    dval = msg.get("Date")
+    try:
+        date_dt = parsedate_to_datetime(dval) if dval else None
+        date_norm = date_dt.astimezone().isoformat(timespec="seconds") if date_dt else (dval or "")
+    except Exception:
+        date_norm = dval or ""
+
+    # Prefer plain; else convert HTML; if both exist and differ, include both
+    body_md = ""
+    if t_plain.strip():
+        body_md = t_plain.strip()
+    elif t_html.strip():
+        html_fixed = replace_cid_urls(t_html, cid_map)
+        body_md = html_to_markdown(html_fixed).strip()
+    # if both present and significantly different, append HTML→MD version too
+    elif t_plain.strip() and t_html.strip():
+        html_fixed = replace_cid_urls(t_html, cid_map)
+        body_md = t_plain.strip() + "\n\n---\n\n" + html_to_markdown(html_fixed).strip()
+
+    # Inline embed images that were referenced by CID but not present in body (e.g., for plain text)
+    # We'll just append a small gallery of images at the end of the message
+    image_embeds = []
+    other_attachments = []
+    for rel_path, is_img, fname in saved:
+        if is_img:
+            image_embeds.append(f"![{fname}]({rel_path})")
+        else:
+            other_attachments.append(f"[{fname}]({rel_path})")
+
+    meta_lines = [
+        f"### {subject or '(no subject)'}",
+        "",
+        f"- **From:** {from_}" if from_ else "- **From:** (unknown)",
+        f"- **To:** {to_}" if to_ else None,
+        f"- **Cc:** {cc_}" if cc_ else None,
+        f"- **Bcc:** {bcc_}" if bcc_ else None,
+        f"- **Date:** {date_norm}" if date_norm else None,
+    ]
+    meta = "\n".join([m for m in meta_lines if m])
+
+    parts = [meta, "", body_md or "_(no body)_"]
+
+    if image_embeds:
+        parts += ["", "**Images:**", ""]
+        parts += [img for img in image_embeds]
+    if other_attachments:
+        parts += ["", "**Attachments:**", ""]
+        parts += [f"- {link}" for link in other_attachments]
+
+    return "\n".join(parts).rstrip() + "\n", saved
+
+def try_generate_pdf(markdown_path: Path, pdf_path: Path) -> bool:
+    """Attempt to turn Markdown into a PDF using WeasyPrint, Pandoc, or wkhtmltopdf."""
+    try:
+        md_text = markdown_path.read_text(encoding="utf-8")
+    except Exception as e:
+        print(f"[warn] could not read {markdown_path}: {e}", file=sys.stderr)
+        return False
+
+    # Convert MD → HTML (prefer python-markdown)
+    html_text = None
+    try:
+        import markdown as py_markdown
+        html_body = py_markdown.markdown(md_text, extensions=["tables", "fenced_code"])
+        html_text = f"<!doctype html><meta charset='utf-8'><style>html {{padding: 1em;}} body{{width:500px;margin:2rem auto; font-size:.8em;}} img{{max-width:100%;}}  code {{text-wrap:auto !important;}} pre {{text-wrap:auto !important;}}  lua {{text-wrap:auto !important;}}  blockquote {{text-wrap:auto !important;}}  blockquote {{margin: 0 0 0 1em; padding: 0 0 0 1em; border-left:5px solid red;}}  </style><body>{html_body}</body>"
+    except Exception:
+        # minimal fallback: pre block
+        safe = html.escape(md_text)
+        html_text = f"<!doctype html><meta charset='utf-8'><style>html {{padding: 1em;}} body{{width:590px;margin:2rem auto;white-space:pre-wrap; font-size:.8em;}} img{{max-width:100%;}} code {{text-wrap:auto !important;}} pre {{text-wrap:auto !important;}}  lua {{text-wrap:auto !important;}}  blockquote {{text-wrap:auto !important;}} blockquote {{margin: 0 0 0 1em;   padding: 0 0 0 1em; border-left:5px solid purple;}} </style><body><pre>{safe}</pre></body>"
+
+    try:
+      out_html_path = pdf_path.with_suffix('.html')
+      with open(out_html_path, 'w') as f:
+        f.write(html_text)
+        print(f"[ok] Wrote HTML: {out_html_path}")
+    except Exception as e:
+      print(e)
+
+    # 1) WeasyPrint (pure Python)
+    try:
+        from weasyprint import HTML
+        HTML(string=html_text, base_url=str(markdown_path.parent)).write_pdf(str(pdf_path))
+        return True
+    except Exception:
+        pass
+
+    # 2) Pandoc
+    if shutil.which("pandoc"):
+        try:
+            import subprocess, tempfile
+            with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False, encoding="utf-8") as tmp:
+                tmp.write(html_text)
+                tmp_path = tmp.name
+            subprocess.run(
+                ["pandoc", tmp_path, "-o", str(pdf_path)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            pass
+
+    # 3) wkhtmltopdf
+    if shutil.which("wkhtmltopdf"):
+        try:
+            import tempfile, subprocess
+            with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False, encoding="utf-8") as tmp:
+                tmp.write(html_text)
+                tmp_path = tmp.name
+            subprocess.run(
+                ["wkhtmltopdf", tmp_path, str(pdf_path)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            pass
+
+    print("[info] No PDF engine found (WeasyPrint/Pandoc/wkhtmltopdf). Skipping PDF.", file=sys.stderr)
+    return False
+
+# ---------- main ----------
+
+def main():
+    ap = argparse.ArgumentParser(description="Convert an mbox to a single Markdown (and optional PDF) with exported attachments.")
+    ap.add_argument("mbox", help="Path to input .mbox file")
+    ap.add_argument("--out", default="mailbox_export.md", help="Output Markdown file path (default: mailbox_export.md)")
+    ap.add_argument("--assets-dir", default=None, help="Directory to store attachments (default: <out_basename>_assets)")
+    ap.add_argument("--pdf", action="store_true", help="Also attempt to write a PDF next to the Markdown (requires WeasyPrint, Pandoc, or wkhtmltopdf)")
+    args = ap.parse_args()
+
+    mbox_path = Path(args.mbox)
+    out_md_path = Path(args.out).with_suffix(".md")
+    assets_dir = Path(args.assets_dir) if args.assets_dir else out_md_path.with_suffix("").parent / (out_md_path.stem + "_assets")
+
+    ensure_dir(out_md_path.parent)
+    ensure_dir(assets_dir)
+
+    try:
+        mbox = mailbox.mbox(str(mbox_path))
+    except Exception as e:
+        print(f"[error] Could not open mbox: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Collect (date, idx, message) to sort by date
+    items = []
+    for i, msg in enumerate(mbox):
+        # Normalize to datetime for sorting
+        dval = msg.get("Date")
+        try:
+            d = parsedate_to_datetime(dval) if dval else dt.datetime.fromtimestamp(0, tz=dt.timezone.utc)
+        except Exception:
+            d = dt.datetime.fromtimestamp(0, tz=dt.timezone.utc)
+        items.append((d, i, msg))
+    items.sort(key=lambda t: t[0])
+
+    lines = []
+    lines.append(f"# Mailbox Export\n")
+    lines.append(f"- **Source:** `{mbox_path}`")
+    lines.append(f"- **Messages:** {len(items)}")
+    lines.append(f"- **Generated:** {now_iso()}")
+    lines.append(f"- **Attachments directory:** `{os.path.relpath(assets_dir, out_md_path.parent)}`")
+    lines.append("\n---\n")
+
+    total_attachments = 0
+
+    for ordinal, (_, idx, msg) in enumerate(items, start=1):
+        section, saved = render_message_markdown(msg, ordinal, assets_dir)
+        total_attachments += len(saved)
+        if ordinal > 1:
+            lines.append("\n---\n")
+        # Anchor for quick navigation
+        subject = decode_hdr(msg.get("Subject") or "")
+        lines.append(f"<a id='msg-{ordinal}'></a>\n")
+        lines.append(section)
+
+    # Footer
+    lines.append("\n---\n")
+    lines.append(f"_End of export. Total attachments saved: {total_attachments}_\n")
+
+    out_md_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[ok] Wrote Markdown: {out_md_path}")
+    print(f"[ok] Saved attachments to: {assets_dir}")
+
+    if args.pdf:
+        out_pdf_path = out_md_path.with_suffix(".pdf")
+        if try_generate_pdf(out_md_path, out_pdf_path):
+            print(f"[ok] Wrote PDF: {out_pdf_path}")
+        else:
+            # Non-fatal
+            pass
+
+if __name__ == "__main__":
+    main()

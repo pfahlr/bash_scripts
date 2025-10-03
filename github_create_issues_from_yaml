@@ -1,0 +1,342 @@
+#!/usr/bin/python3
+#
+# Create GitHub issues (and optionally add them to a GitHub Project)
+# 
+# Rick Pfahl
+# 07 September 2025
+#
+#
+#!/usr/bin/env python3
+"""
+Create GitHub issues (and optionally add them to a GitHub Project v2)
+from a YAML blueprint (e.g. .github/project-board.yml) using the GitHub CLI.
+
+Features:
+  - Finds project by title (GraphQL) or uses --project-number directly.
+  - Handles duplicate project titles by choosing the highest NUMBER (newest).
+  - Auto-creates labels (--ensure-labels).
+  - Adds created issues to a project if a number is known.
+  - Dry-run mode to preview commands.
+
+Requirements:
+  - Python 3.10+
+  - PyYAML: pip install pyyaml
+  - GitHub CLI: https://cli.github.com/  (gh auth login with 'project' scopes)
+
+Example:
+  ./github_create_issues_from_yaml \
+    --yaml .github/project-board.yml \
+    --repo pfahlr/rag_writer \
+    --owner pfahlr \
+    --project "RAG Writer Roadmap" \
+    --create-project \
+    --ensure-labels \
+    --dry-run
+"""
+
+import argparse
+import json
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import yaml
+
+# Map normalized column name -> labels (you can customize)
+COLUMN_LABEL_MAP = {
+    "Core Features": ["core", "must"],
+    "Performance / Retrieval": ["retrieval", "should"],
+    "Extensions": ["extension", "could"],
+}
+
+EMOJI_EDGES = re.compile(r"^[\W_]+|[\W_]+$")  # strip leading/trailing emoji/symbols
+
+
+# -------------------- Shell helpers --------------------
+
+def run(cmd: List[str], dry_run: bool = False, capture_output: bool = False) -> subprocess.CompletedProcess:
+    """Run a shell command; in dry-run, just print it."""
+    if dry_run:
+        print(f"[dry-run] $ {' '.join(shlex.quote(c) for c in cmd)}")
+        class Dummy:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return Dummy()  # type: ignore
+    return subprocess.run(
+        cmd,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+    )
+
+
+# -------------------- Label helpers --------------------
+
+def normalize_column_name(raw: str) -> str:
+    n = EMOJI_EDGES.sub("", (raw or "").strip())
+    n = re.sub(r"\s{2,}", " ", n)
+    return n
+
+
+def labels_for_column(colname: str) -> List[str]:
+    base = normalize_column_name(colname)
+    for key, labels in COLUMN_LABEL_MAP.items():
+        if key.lower() in base.lower():
+            return labels
+    slug = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-") or "uncategorized"
+    return [slug]
+
+
+def ensure_labels(repo: str, labels: List[str], dry_run: bool) -> None:
+    """Create labels if they don't exist (ignore 'already exists')."""
+    for lb in labels:
+        cmd = [
+            "gh", "label", "create", lb,
+            "--repo", repo,
+            "--color", "0E8A16",
+            "--description", f"Auto label: {lb}",
+        ]
+        res = run(cmd, dry_run=dry_run, capture_output=True)
+        if getattr(res, "returncode", 0) != 0:
+            msg = (getattr(res, "stderr", "") or "").lower()
+            if "already exists" not in msg:
+                print(f"[warn] label '{lb}': {(getattr(res, 'stderr', '') or '').strip()}")
+
+
+# -------------------- GraphQL helpers (Projects v2) --------------------
+
+USER_PROJECTS_QUERY = """
+query($login:String!, $after:String) {
+  user(login: $login) {
+    projectsV2(first: 100, after: $after) {
+      nodes { title number }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
+ORG_PROJECTS_QUERY = """
+query($login:String!, $after:String) {
+  organization(login: $login) {
+    projectsV2(first: 100, after: $after) {
+      nodes { title number }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
+
+def gh_api_graphql(query: str, variables: Dict[str, str], dry_run: bool) -> Optional[Dict]:
+    """Call GitHub GraphQL via gh api graphql with -F var=value."""
+    cmd = ["gh", "api", "graphql", "-f", f"query={query}"]
+    for k, v in variables.items():
+        if v is not None:
+            cmd += ["-F", f"{k}={v}"]
+    res = run(cmd, dry_run=dry_run, capture_output=True)
+    if getattr(res, "returncode", 0) != 0:
+        print(f"[warn] gh api graphql failed: {(getattr(res, 'stderr', '') or '').strip()}")
+        return None
+    try:
+        return json.loads(getattr(res, "stdout", "") or "{}")
+    except Exception as e:
+        print(f"[warn] Could not parse GraphQL JSON: {e}")
+        return None
+
+
+def list_projects_anyshape(owner: str, dry_run: bool) -> List[Dict]:
+    """
+    Return a list of {title, number} dicts for the given owner.
+    Tries:
+      1) GraphQL Projects v2 for user
+      2) GraphQL Projects v2 for org
+      3) Fallback: gh project list --owner <owner> --format json (accepts {'projects':[...]} or list)
+    """
+    projects: List[Dict] = []
+
+    # -- GraphQL: user --
+    after = None
+    while True:
+        vars_user = {"login": owner, "after": after}
+        data = gh_api_graphql(USER_PROJECTS_QUERY, vars_user, dry_run)
+        nodes = (data or {}).get("data", {}).get("user", {}).get("projectsV2", {}).get("nodes", []) or []
+        for n in nodes:
+            if isinstance(n, dict) and "title" in n and "number" in n:
+                projects.append({"title": n["title"], "number": n["number"]})
+        page = (data or {}).get("data", {}).get("user", {}).get("projectsV2", {}).get("pageInfo", {}) or {}
+        if not page.get("hasNextPage"):
+            break
+        after = page.get("endCursor") or None
+        if not after:
+            break
+
+    if projects:
+        return projects
+
+    # -- GraphQL: org --
+    after = None
+    while True:
+        vars_org = {"login": owner, "after": after}
+        data = gh_api_graphql(ORG_PROJECTS_QUERY, vars_org, dry_run)
+        nodes = (data or {}).get("data", {}).get("organization", {}).get("projectsV2", {}).get("nodes", []) or []
+        for n in nodes:
+            if isinstance(n, dict) and "title" in n and "number" in n:
+                projects.append({"title": n["title"], "number": n["number"]})
+        page = (data or {}).get("data", {}).get("organization", {}).get("projectsV2", {}).get("pageInfo", {}) or {}
+        if not page.get("hasNextPage"):
+            break
+        after = page.get("endCursor") or None
+        if not after:
+            break
+
+    if projects:
+        return projects
+
+    # -- Fallback: gh project list --format json --
+    res = run(["gh", "project", "list", "--owner", owner, "--format", "json"], dry_run=dry_run, capture_output=True)
+    if getattr(res, "returncode", 0) == 0:
+        try:
+            raw = getattr(res, "stdout", "") or ""
+            data = json.loads(raw)
+            if isinstance(data, dict) and isinstance(data.get("projects"), list):
+                for p in data["projects"]:
+                    if isinstance(p, dict) and "title" in p and "number" in p:
+                        projects.append({"title": p["title"], "number": p["number"]})
+            elif isinstance(data, list):
+                for p in data:
+                    if isinstance(p, dict) and "title" in p and "number" in p:
+                        projects.append({"title": p["title"], "number": p["number"]})
+        except Exception as e:
+            print(f"[warn] Could not parse projects (fallback): {e}")
+
+    return projects
+
+
+def find_project_number_by_title(owner: str, title: str, dry_run: bool) -> Optional[str]:
+    """Return the project number for title. If duplicates, choose the highest number (newest)."""
+    candidates: List[Dict] = []
+    for p in list_projects_anyshape(owner, dry_run):
+        if str(p.get("title")) == title:
+            try:
+                num = int(p.get("number"))
+                candidates.append({"title": title, "number": num})
+            except Exception:
+                continue
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda x: x["number"])
+    return str(best["number"])
+
+
+def get_or_create_project(owner: str, project_title: str, create_if_missing: bool, dry_run: bool) -> Optional[str]:
+    """Find a project by title (preferring newest). Create it if missing and requested."""
+    number = find_project_number_by_title(owner, project_title, dry_run)
+    if number:
+        return number
+
+    if not create_if_missing:
+        return None
+
+    # Create the project (Projects v2)
+    create_cmd = ["gh", "project", "create", "--title", project_title, "--owner", owner]
+    created = run(create_cmd, dry_run=dry_run, capture_output=True)
+    if getattr(created, "returncode", 0) != 0:
+        print(f"[warn] Could not create project: {(getattr(created, 'stderr', '') or '').strip()}")
+        return None
+
+    # Re-fetch
+    return find_project_number_by_title(owner, project_title, dry_run)
+
+
+# -------------------- Issue + Project item helpers --------------------
+
+def add_issue_to_project(project_number: str, issue_url: str, dry_run: bool) -> None:
+    run(["gh", "project", "item-add", project_number, "--url", issue_url], dry_run=dry_run)
+
+
+def create_issue(repo: str, title: str, body: str, labels: List[str], dry_run: bool) -> Optional[str]:
+    cmd = ["gh", "issue", "create", "--repo", repo, "--title", title]
+    if body:
+        cmd += ["--body", body]
+    for lb in labels:
+        cmd += ["--label", lb]
+    res = run(cmd, dry_run=dry_run, capture_output=True)
+    if getattr(res, "returncode", 0) == 0:
+        return (getattr(res, "stdout", "") or "").strip()  # gh prints issue URL
+    print(f"[error] Failed to create issue '{title}': {(getattr(res, 'stderr', '') or '').strip()}")
+    return None
+
+
+def parse_yaml(path: Path) -> Dict:
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+# -------------------- Main --------------------
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Create GitHub issues from a YAML board via gh.")
+    ap.add_argument("--yaml", required=True, help="Path to YAML file (e.g., .github/project-board.yml)")
+    ap.add_argument("--repo", required=True, help="owner/repo (e.g., pfahlr/rag_writer)")
+    ap.add_argument("--owner", required=True, help="Project owner (user or org login, e.g., pfahlr)")
+    ap.add_argument("--project", help="Project title (if not using --project-number)")
+    ap.add_argument("--project-number", help="Project number (skip lookup). Example: 5")
+    ap.add_argument("--create-project", action="store_true", help="Create the project if not found by title")
+    ap.add_argument("--ensure-labels", action="store_true", help="Create labels if missing")
+    ap.add_argument("--dry-run", action="store_true", help="Print actions, don't execute")
+    args = ap.parse_args()
+
+    # Ensure gh is authenticated (and has project scopes)
+    auth = run(["gh", "auth", "status", "-t"], dry_run=False, capture_output=True)
+    if auth.returncode != 0:
+        print("[error] gh not authenticated. Run: gh auth login")
+        sys.exit(1)
+    # You ideally want 'project' in scopes:
+    scopes_line = (auth.stdout or "").lower()
+    if "project" not in scopes_line:
+        print("[warn] Your gh token may be missing 'project' scopes. If you hit errors, run: gh auth refresh -s project")
+
+    data = parse_yaml(Path(args.yaml))
+    columns = data.get("columns", [])
+    if not columns:
+        print("[error] No 'columns' found in YAML.")
+        sys.exit(1)
+
+    project_number = args.project_number
+    if not project_number and args.project:
+        project_number = get_or_create_project(args.owner, args.project, args.create_project, args.dry_run)
+        if args.project and not project_number:
+            print("[warn] Proceeding without project linkage (project not found/created).")
+
+    for col in columns:
+        col_name_raw = col.get("name", "Uncategorized")
+        col_labels = labels_for_column(col_name_raw)
+        if args.ensure_labels:
+            ensure_labels(args.repo, col_labels, args.dry_run)
+
+        for card in col.get("cards", []):
+            title = (card.get("title") or "").strip()
+            body = (card.get("body") or "").strip()
+            if not title:
+                print("[skip] Card without title")
+                continue
+
+            issue_url = create_issue(args.repo, title, body, col_labels, args.dry_run)
+            if project_number and issue_url:
+                add_issue_to_project(project_number, issue_url, args.dry_run)
+
+    print("Done.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nAborted by user.")
+        sys.exit(130)
