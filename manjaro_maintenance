@@ -47,7 +47,7 @@ homdiruseage () {
   returntomain
 } 
 systemupdate () {
-  cmd="$pacman_update_executable -Syyu --sudoloop --noconfirm"
+  cmd="$pacman_update_executable -Syyu --answerdiff N --answerclean N --answeredit N --answerupgrade Y --sudoloop --needed --removemake --noconfirm"
   echo $cmd 
   $cmd
 }
