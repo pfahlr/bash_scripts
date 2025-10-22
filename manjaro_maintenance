@@ -1,5 +1,7 @@
 #!/bin/bash
 pacman_update_executable="yay"
+pacman_main_executable="pacman"
+pager_of_choice="most"
 
 runcmd () {
   echo "running command: $1"
@@ -16,7 +18,7 @@ returntomain () {
 }
 
 uninstallorphans () {
-  cmd="pacman -Qdtq | sudo pacman -Rns -"
+  cmd="$pacman_main_executable -Qdtq | sudo $pacman_main_executable -Rns -"
   runcmd "$cmd"
   returntomain
 }
@@ -30,7 +32,7 @@ deletecahe () {
 }
 
 pacmanclean () {
-  cmd="sudo pacman -Scc"
+  cmd="sudo $pacman_main_executable -Scc"
   runcmd "$cmd"
   returntomain
 }
@@ -42,14 +44,21 @@ homdiruseage () {
   tempfilename="homedirusage__$timestamp"
   sudo du -sh $HOME/* | grep '[M,G]' > "/tmp/$tempfilename" 
   sudo du -sh $HOME/.* | grep '[M,G]' >> "/tmp/$tempfilename"
-  less /tmp/$tempfilename
+  $pager_of_choice /tmp/$tempfilename
   rm /tmp/$tempfilename
   returntomain
 } 
+
+listinstalledsizes () {
+  ( echo "Package  Size" && expac "%n\t%m" -l'\n' -H M -Q $($pacman_main_executable -Qq)  | sort -rhk 2 ) | column -t | $pager_of_choice
+  returntomain
+}
+
 systemupdate () {
   cmd="$pacman_update_executable -Syyu --answerdiff N --answerclean N --answeredit N --answerupgrade Y --sudoloop --needed --removemake --noconfirm"
   echo $cmd 
   $cmd
+  returntomain
 }
 
 mainmenu () {
@@ -61,7 +70,7 @@ mainmenu () {
 █▓░                                                                          ░▓█
 █▓░ (1) Uninstall Orphaned Packages    (2) Run pacman/yay clean              ░▓█
 █▓░ (3) Delete Cache                   (4) Summarize Home Directory Usage    ░▓█
-█▓░ (5) Update System                                                        ░▓█
+█▓░ (5) Update System		       (6) List Installed Packages           ░▓█
 █▓░ (Q) EXIT                                                                 ░▓█
 █▓░                                                                          ░▓█
 █▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓█
@@ -82,6 +91,8 @@ mainmenu () {
       homdiruseage
     elif [ "$mainmenuinput" = "5" ]; then
       systemupdate      
+    elif [ "$mainmenuinput" = "6" ]; then
+      listinstalledsizes
     elif [ "$mainmenuinput" = "Q" ]; then
       exit
     elif [ "$mainmenuinput" = "q" ]; then
