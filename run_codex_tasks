@@ -1,78 +1,72 @@
 #!/bin/bash
 
-# === Usage Check ===
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then
   echo "Usage: $0 path_to_task_list.txt [task_directory (default: codex/TASKS)]"
   exit 1
 fi
 
-# === Input Parameters ===
 TASK_FILE="$1"
-TASK_DIR="${2:-codex/TASKS}"  # Default to codex/TASKS if not specified
+TASK_DIR="${2:-codex/TASKS}"
 LOG_FILE="codex_run_$(date +'%Y-%m-%d_%H-%M-%S').log"
 TMUX_PREFIX="codex_task"
-CODEX_CMD="codex run"
-APPROVALS="full"
+CODEX_CMD="codex"
+WORKDIR=$(pwd)
 
-# === Verify Task File ===
 if [ ! -f "$TASK_FILE" ]; then
-  echo "❌ Error: Task file '$TASK_FILE' not found."
+  echo "❌ Task file '$TASK_FILE' not found."
   exit 1
 fi
 
-# === Read & Normalize Tasks ===
 mapfile -t RAW_TASKS < "$TASK_FILE"
 TASKS=()
 
 for LINE in "${RAW_TASKS[@]}"; do
-  [[ -z "$LINE" || "$LINE" =~ ^# ]] && continue  # Skip blank lines and comments
-
-  # Normalize extension to .yaml
+  [[ -z "$LINE" || "$LINE" =~ ^# ]] && continue
   BASE_TASK=$(basename "$LINE" .yml)
   BASE_TASK=$(basename "$BASE_TASK" .yaml)
   TASKS+=("$BASE_TASK")
 done
 
-# === Log Header ===
-echo "🚀 Starting Codex task runner at $(date)" | tee -a "$LOG_FILE"
-echo "Using task file: $TASK_FILE" | tee -a "$LOG_FILE"
+echo "🚀 Starting Codex Agent runner at $(date)" | tee -a "$LOG_FILE"
+echo "Task file: $TASK_FILE" | tee -a "$LOG_FILE"
 echo "Task directory: $TASK_DIR" | tee -a "$LOG_FILE"
+echo "Working directory: $WORKDIR" | tee -a "$LOG_FILE"
 echo "Tasks: ${TASKS[*]}" | tee -a "$LOG_FILE"
-echo "Log file: $LOG_FILE"
 echo "=======================================" | tee -a "$LOG_FILE"
 
-# === Execute Tasks ===
 for TASK in "${TASKS[@]}"; do
   YAML_PATH="$TASK_DIR/${TASK}.yaml"
-  TMUX_SESSION="${TMUX_PREFIX}_${TASK}"
+  TASK_LOG="tasklog_${TASK}_$(date +%s).log"
+  TASK_DONE="${TASK_LOG}.done"
 
   if [ ! -f "$YAML_PATH" ]; then
-    echo "❌ Task spec not found: $YAML_PATH" | tee -a "$LOG_FILE"
+    echo "❌ Spec not found: $YAML_PATH" | tee -a "$LOG_FILE"
     exit 1
   fi
 
-  echo "🟡 Starting task: $TASK" | tee -a "$LOG_FILE"
+  echo "🟡 Executing task: $TASK" | tee -a "$LOG_FILE"
 
-  # Kill existing session if any
-  tmux has-session -t "$TMUX_SESSION" 2>/dev/null && tmux kill-session -t "$TMUX_SESSION"
+  # Prompt for Codex
+  PROMPT="Implement the functionality described in ${YAML_PATH}, then verify with any available tests."
 
-  # Start tmux session and run Codex
-  tmux new-session -d -s "$TMUX_SESSION" \
-    "$CODEX_CMD --start $YAML_PATH --require-pass --test-mode=tmux --approvals=$APPROVALS --notes 'Auto-run of $TASK using tmux. Ensure all tests pass before continuing.'"
+  # Run codex in tmux, capture log, and mark done
+  tmux new-session -d -s "${TMUX_PREFIX}_${TASK}" \
+    "codex exec --full-auto --cd \"$WORKDIR\" \"$PROMPT\" > \"$TASK_LOG\" 2>&1; touch \"$TASK_DONE\""
 
-  # Wait and check
-  sleep 2
+  while [ ! -f "$TASK_DONE" ]; do
+    sleep 1
+  done
 
-  if tmux has-session -t "$TMUX_SESSION"; then
-    echo "✅ Task $TASK completed (check Codex output manually or logs inside tmux)." | tee -a "$LOG_FILE"
-    tmux kill-session -t "$TMUX_SESSION"
+  if grep -q -i "success\|completed\|all tests passed" "$TASK_LOG"; then
+    echo "✅ Task $TASK completed successfully." | tee -a "$LOG_FILE"
   else
-    echo "❌ Task $TASK failed or exited unexpectedly." | tee -a "$LOG_FILE"
-    echo "Exiting task runner." | tee -a "$LOG_FILE"
+    echo "❌ Task $TASK may have failed or not confirmed success." | tee -a "$LOG_FILE"
+    echo "📄 Last 20 lines from $TASK_LOG:" | tee -a "$LOG_FILE"
+    tail -n 20 "$TASK_LOG" | tee -a "$LOG_FILE"
     exit 1
   fi
 
   echo "---------------------------------------" | tee -a "$LOG_FILE"
 done
 
-echo "🎉 All tasks completed successfully." | tee -a "$LOG_FILE"
+echo "🎉 All tasks completed (or passed success detection)." | tee -a "$LOG_FILE"
