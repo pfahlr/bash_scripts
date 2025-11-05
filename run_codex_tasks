@@ -30,6 +30,10 @@ while [[ $# -gt 0 ]]; do
       CONFIG_FILE="$2"
       shift 2
       ;;
+    -r|--rollback-last)
+      ROLLBACK=true
+      shift
+      ;;
     *)
       echo "❌ Unknown argument: $1"
       echo "Usage: $0 --task-list <file> [--task-dir <dir>] [--log-dir <dir>] [--auto-commit] [--config <toml>]"
@@ -37,6 +41,39 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$ROLLBACK" = true ]]; then
+  mkdir -p "$LOG_DIR"
+  LOG_FILE="$LOG_DIR/codex_run_rollback_$(date +'%Y-%m-%d_%H-%M-%S').log"
+  echo "🧯 Initiating safe rollback..." | tee -a "$LOG_FILE"
+
+  LAST_COMMIT_HASH=$(git rev-parse HEAD 2>/dev/null)
+  if [[ -z "$LAST_COMMIT_HASH" ]]; then
+    echo "❌ No commits found to roll back." | tee -a "$LOG_FILE"
+    exit 1
+  fi
+
+  LAST_COMMIT_MSG=$(git log -1 --pretty=%B)
+  if echo "$LAST_COMMIT_MSG" | grep -q "Codex Task:"; then
+    echo "🧾 Last commit is a Codex commit:" | tee -a "$LOG_FILE"
+    echo "$LAST_COMMIT_MSG" | tee -a "$LOG_FILE"
+    echo "🧯 Rolling back commit $LAST_COMMIT_HASH ..." | tee -a "$LOG_FILE"
+
+    git reset --soft "${LAST_COMMIT_HASH}^" && git restore --staged . && \
+      echo "✅ Rollback complete. Changes are in your working directory for review." | tee -a "$LOG_FILE"
+
+    echo "📝 To redo commit later:" | tee -a "$LOG_FILE"
+    echo "git add . && git commit -m \"$LAST_COMMIT_MSG\"" | tee -a "$LOG_FILE"
+  else
+    echo "⚠️ Last commit does not appear to be a Codex-generated commit." | tee -a "$LOG_FILE"
+    echo "Commit message:" | tee -a "$LOG_FILE"
+    echo "$LAST_COMMIT_MSG" | tee -a "$LOG_FILE"
+    echo "🚫 Aborting rollback for safety." | tee -a "$LOG_FILE"
+    exit 1
+  fi
+
+  exit 0
+fi
 
 if [[ -z "$TASK_FILE" ]]; then
   echo "❌ Missing required --task-list"
@@ -134,7 +171,13 @@ Summary:
 Codex Output:
 $(tail -n 20 "$TASK_LOG")"
 
-      git commit -m "$COMMIT_MSG" | tee -a "$LOG_FILE"
+      COMMIT_OUTPUT=$(git commit -m "$COMMIT_MSG")
+      echo "$COMMIT_OUTPUT" | tee -a "$LOG_FILE"
+
+      # Extract commit hash
+      COMMIT_HASH=$(git rev-parse HEAD)
+      echo "📝 Commit created: $COMMIT_HASH" | tee -a "$LOG_FILE"
+      echo "🧯 Rollback with: git reset --soft ${COMMIT_HASH}^ && git restore --staged ." | tee -a "$LOG_FILE"
     else
       echo "⚠️  No new or modified files detected for commit (excluding logs)." | tee -a "$LOG_FILE"
     fi
