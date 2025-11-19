@@ -78,6 +78,10 @@ def emit_state(state: Dict[str, Any]) -> str:
 
 
 def generate_exports(items: Dict[str, Any], names: List[str]) -> Dict[str, str]:
+  """
+  Merge env vars for the given items.
+  Later items override earlier ones on conflicts (same variable name).
+  """
   merged: Dict[str, str] = {}
   for name in names:
     item_def = items.get(name)
@@ -85,7 +89,6 @@ def generate_exports(items: Dict[str, Any], names: List[str]) -> Dict[str, str]:
       print(f"# WARNING: item '{name}' not found in config", file=sys.stderr)
       continue
     env_map = item_to_env_map(item_def)
-    # later items override earlier ones on conflicts
     merged.update(env_map)
   return merged
 
@@ -111,6 +114,197 @@ def diff_env(vars_expected: Dict[str, str]) -> List[str]:
     else:
       lines.append(f"✖ {k}={cur} (expected {v})")
   return lines
+
+
+def describe_collisions(
+  items: Dict[str, Any],
+  names: List[str],
+  state: Dict[str, Any],
+) -> List[str]:
+  """
+  Produce human-readable notes about:
+    - collisions between the requested items themselves
+    - collisions between requested items and currently-active items
+  """
+  notes: List[str] = []
+
+  # Build env maps for requested items
+  item_envs: Dict[str, Dict[str, str]] = {}
+  for name in names:
+    item_def = items.get(name)
+    if item_def is None:
+      continue
+    item_envs[name] = item_to_env_map(item_def)
+
+  req_names = list(item_envs.keys())
+
+  # 1) Collisions among requested items
+  for i in range(len(req_names)):
+    ni = req_names[i]
+    env_i = item_envs[ni]
+    keys_i = set(env_i.keys())
+    for j in range(i + 1, len(req_names)):
+      nj = req_names[j]
+      env_j = item_envs[nj]
+      keys_j = set(env_j.keys())
+      overlap = keys_i & keys_j
+      if not overlap:
+        continue
+
+      # Conflicting values
+      for var in sorted(overlap):
+        vi = env_i[var]
+        vj = env_j[var]
+        if vi != vj:
+          notes.append(
+            f"# NOTE: variable {var} has conflicting values between items "
+            f"'{ni}' ('{vi}') and '{nj}' ('{vj}'); later item in the argument "
+            f"list will win when activating both."
+          )
+
+      # Different variable sets for colliding items
+      if keys_i != keys_j:
+        only_i = sorted(keys_i - keys_j)
+        only_j = sorted(keys_j - keys_i)
+        notes.append(
+          f"# WARNING: items '{ni}' and '{nj}' share variables "
+          f"{', '.join(sorted(overlap))} but have different variable sets."
+        )
+        if only_i:
+          notes.append(f"#          Variables only in '{ni}': {', '.join(only_i)}")
+        if only_j:
+          notes.append(f"#          Variables only in '{nj}': {', '.join(only_j)}")
+
+  # 2) Collisions vs currently-active items in state
+  for new_name, new_env in item_envs.items():
+    new_keys = set(new_env.keys())
+    for active_name, entry in state.items():
+      if active_name == new_name:
+        continue
+      if not isinstance(entry, dict) or not entry.get("active"):
+        continue
+
+      active_env = entry.get("vars")
+      if not isinstance(active_env, dict):
+        item_def = items.get(active_name)
+        if item_def is None:
+          continue
+        active_env = item_to_env_map(item_def)
+
+      active_keys = set(active_env.keys())
+      overlap = new_keys & active_keys
+      if not overlap:
+        continue
+
+      notes.append(
+        f"# NOTE: activating '{new_name}' would override/deactivate active item "
+        f"'{active_name}' for variables: {', '.join(sorted(overlap))}."
+      )
+
+      if new_keys != active_keys:
+        only_new = sorted(new_keys - active_keys)
+        only_old = sorted(active_keys - new_keys)
+        notes.append(
+          f"# WARNING: items '{new_name}' and active '{active_name}' "
+          f"have different variable sets."
+        )
+        if only_new:
+          notes.append(
+            f"#          Variables only in '{new_name}': {', '.join(only_new)}"
+          )
+        if only_old:
+          notes.append(
+            f"#          Variables only in '{active_name}': {', '.join(only_old)}"
+          )
+
+  return notes
+
+
+def compute_auto_deactivation(
+  items: Dict[str, Any],
+  state: Dict[str, Any],
+  names_to_activate: List[str],
+) -> (List[str], Dict[str, Any], List[str]):
+  """
+  For each item being activated, if it shares any variable name with an
+  already-active item, that active item is considered a mutually-exclusive
+  configuration and is auto-deactivated.
+
+  Returns:
+    - notes: list of comment lines describing what happens
+    - updated_state: new state dict with affected items marked inactive
+    - vars_to_unset: list of variable names to unset from deactivated items
+  """
+  notes: List[str] = []
+  vars_to_unset: List[str] = []
+
+  # We'll mutate a copy of state so we can return the updated version
+  new_state: Dict[str, Any] = dict(state)
+
+  # Build envs for active items from state
+  active_items_env: Dict[str, Dict[str, str]] = {}
+  for name, entry in state.items():
+    if not isinstance(entry, dict) or not entry.get("active"):
+      continue
+    env_map = entry.get("vars")
+    if not isinstance(env_map, dict):
+      item_def = items.get(name)
+      if item_def is None:
+        continue
+      env_map = item_to_env_map(item_def)
+    active_items_env[name] = env_map
+
+  for new_name in names_to_activate:
+    item_def = items.get(new_name)
+    if item_def is None:
+      continue
+    new_env = item_to_env_map(item_def)
+    new_keys = set(new_env.keys())
+
+    for active_name, active_env in active_items_env.items():
+      # Don't compare with itself, and don't auto-deactivate something
+      # that is also being activated in this same call.
+      if active_name == new_name or active_name in names_to_activate:
+        continue
+
+      active_keys = set(active_env.keys())
+      overlap = new_keys & active_keys
+      if not overlap:
+        continue
+
+      # Collision: new_name represents a different configuration than active_name
+      notes.append(
+        f"# NOTE: activating '{new_name}' will deactivate active item "
+        f"'{active_name}' due to shared variables: {', '.join(sorted(overlap))}."
+      )
+      if new_keys != active_keys:
+        only_new = sorted(new_keys - active_keys)
+        only_old = sorted(active_keys - new_keys)
+        notes.append(
+          f"# WARNING: items '{new_name}' and '{active_name}' have different "
+          "variable sets."
+        )
+        if only_new:
+          notes.append(
+            f"#          Variables only in '{new_name}': {', '.join(only_new)}"
+          )
+        if only_old:
+          notes.append(
+            f"#          Variables only in '{active_name}': {', '.join(only_old)}"
+          )
+
+      # Collect all vars from the deactivated item to unset
+      for var in active_env.keys():
+        if var not in vars_to_unset:
+          vars_to_unset.append(var)
+
+      # Mark the collided item as inactive in state
+      prev_entry = dict(new_state.get(active_name, {}))
+      prev_entry["active"] = False
+      prev_entry["vars"] = active_env
+      new_state[active_name] = prev_entry
+
+  return notes, new_state, vars_to_unset
 
 
 def print_table(items: Dict[str, Any]) -> None:
@@ -161,8 +355,8 @@ def print_config_template() -> None:
       },
       "multi_item": {
         "values": [
-          { "EXAMPLE_VAR1": "VALUE1" },
-          { "EXAMPLE_VAR2": "VALUE2" }
+          {"EXAMPLE_VAR1": "VALUE1"},
+          {"EXAMPLE_VAR2": "VALUE2"}
         ]
       }
     }
@@ -188,26 +382,28 @@ def build_parser() -> argparse.ArgumentParser:
     "    }\n"
     "  }\n"
     "}\n\n"
-    "To apply changes in your *current shell*, run via eval, e.g.:\n"
-    "  eval \"$(myshellenv.manager --activate sample_item,sample_item2)\"\n"
+    "To apply changes in your *current shell*, either:\n"
+    "  eval \"$(myshellenv.manager-core --activate sample_item)\"\n"
+    "or use a wrapper function that evals the output for activate/deactivate."
   )
 
   epilog = (
     "Operations:\n"
     "  --activate / --deactivate  Emit export/unset commands for given items.\n"
     "  --show                     Dry run: show export commands without changing env.\n"
-    "  --check                    Compare current env to config for given items.\n"
+    "  --check                    Compare current env to config for the given items.\n"
     "  --list                     Show a table of items, vars, and active state.\n"
     "  --gen-config-template      Print an example config JSON and exit.\n\n"
-    "State tracking:\n"
-    f"  When used via eval with --activate/--deactivate, the script updates\n"
-    f"  {STATE_ENV_VAR}, a JSON object describing known items and their\n"
-    "  last-applied values.  --list uses the *current* environment to decide\n"
-    "  whether an item is active (all its vars match their configured values)."
+    "Collisions:\n"
+    "  If two items share variable names, later items in an --activate list win.\n"
+    "  When you activate an item that shares any variable name with an already\n"
+    "  active item, the older item is auto-deactivated (its vars are unset).\n"
+    "  --show/--check will print notes when items collide or have mismatched\n"
+    "  variable sets, so you can see which config will override which."
   )
 
   parser = argparse.ArgumentParser(
-    prog="myshellenv.manager",
+    prog="myshellenv.manager-core",
     description=description,
     epilog=epilog,
     formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -268,7 +464,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.print_help()
     return 1
 
-  # Avoid mixing env-changing ops with list/template (which are informational)
+  # Avoid mixing env-changing ops with list/template in one call
   if has_mutating and (args.list or args.gen_config_template):
     parser.error(
       "Cannot combine --activate/--deactivate with --list/--gen-config-template "
@@ -285,11 +481,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"# ERROR: {e}", file=sys.stderr)
     return 1
 
+  state = get_state()
+
   if args.list:
     print_table(items)
     return 0
 
-  # show / check: informational only (do not emit export/unset commands)
+  # For show/check, precompute collision notes over all mentioned items once
+  if args.show or args.check:
+    combined_names = parse_names((args.show or []) + (args.check or []))
+    collision_notes = describe_collisions(items, combined_names, state)
+    for line in collision_notes:
+      print(line)
+
   if args.show:
     names = parse_names(args.show)
     vars_expected = generate_exports(items, names)
@@ -305,36 +509,62 @@ def main(argv: Optional[List[str]] = None) -> int:
       print(line)
 
   # Mutating operations: emit shell commands for eval
-  state = get_state()
   commands: List[str] = []
+  activation_notes: List[str] = []
 
   if args.activate:
     names = parse_names(args.activate)
+
+    # Handle auto-deactivation due to collisions with already-active items
+    notes, updated_state, vars_to_unset = compute_auto_deactivation(
+      items, state, names
+    )
+    activation_notes.extend(notes)
+    state = updated_state
+
+    # Plan exports for new activations (later names override earlier)
     vars_to_set = generate_exports(items, names)
+
+    # First unset vars from auto-deactivated items
+    for var in vars_to_unset:
+      commands.append(f"unset {var}")
+
+    # Then export new values
     for k, v in vars_to_set.items():
       commands.append(f"export {k}={shlex.quote(v)}")
-    # Update internal state
+
+    # Update state for newly activated items
     for name in names:
-      if name in items:
-        env_map = item_to_env_map(items[name])
-        if env_map:
-          state[name] = {"active": True, "vars": env_map}
+      item_def = items.get(name)
+      if item_def is None:
+        continue
+      env_map = item_to_env_map(item_def)
+      if not env_map:
+        continue
+      state[name] = {"active": True, "vars": env_map}
 
   if args.deactivate:
     names = parse_names(args.deactivate)
     vars_to_unset = generate_exports(items, names)
     for k in vars_to_unset.keys():
       commands.append(f"unset {k}")
-    # Update internal state (keep last known vars)
+    # Update state (keep last known vars if present)
     for name in names:
-      if name in items:
-        prev = state.get(name, {})
-        prev_vars = prev.get("vars", item_to_env_map(items[name]))
-        state[name] = {"active": False, "vars": prev_vars}
+      item_def = items.get(name)
+      if item_def is None and name not in state:
+        continue
+      prev_entry = dict(state.get(name, {}))
+      if "vars" not in prev_entry and item_def is not None:
+        prev_entry["vars"] = item_to_env_map(item_def)
+      prev_entry["active"] = False
+      state[name] = prev_entry
 
   if commands:
     # Also export updated state
     commands.append(emit_state(state))
+    # Print notes first (safe as comments even when eval'd)
+    for line in activation_notes:
+      print(line)
     for cmd in commands:
       print(cmd)
 

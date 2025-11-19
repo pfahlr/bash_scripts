@@ -30,7 +30,7 @@ MYSHENV_WRAPPER_DIR="$(cd -P "$(dirname -- "$_myshellenv_src")" >/dev/null 2>&1 
 # (optional) export it if you want it visible everywhere
 export MYSHENV_WRAPPER_DIR
 
-myshellenv.manager() {
+myshellenv() {
   core="${MYSHENV_MANAGER_CORE:-$MYSHENV_WRAPPER_DIR/myshellenv.manager-core}"
 
   if [ ! -x "$core" ]; then
