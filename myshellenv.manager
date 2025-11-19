@@ -1,0 +1,69 @@
+# ~/.myshellenv.wrapper.sh
+# to install add `source "[path to this file]/.myshellenv.wrapper.sh"`  to your bashrc, zshrc or whatever
+
+# --- resolve the directory where THIS FILE lives (bash + zsh) ---
+# 1. Figure out the path of this script file, even when sourced
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  # bash: BASH_SOURCE[0] is the file being executed or sourced
+  _myshellenv_src="${BASH_SOURCE[0]}"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+  # zsh: ${(%):-%N} expands to the current script filename when sourced
+  _myshellenv_src="${(%):-%N}"
+else
+  # fallback (might just be the shell name if sourced in other shells)
+  _myshellenv_src="$0"
+fi
+
+# 2. Resolve any symlinks
+while [ -h "$_myshellenv_src" ]; do
+  _myshellenv_dir="$(cd -P "$(dirname -- "$_myshellenv_src")" >/dev/null 2>&1 && pwd)"
+  _myshellenv_src="$(readlink -- "$_myshellenv_src")"
+  case "$_myshellenv_src" in
+    /*) ;;  # absolute, nothing to do
+    *) _myshellenv_src="$_myshellenv_dir/$_myshellenv_src" ;;
+  esac
+done
+
+# 3. Get the final absolute directory path
+MYSHENV_WRAPPER_DIR="$(cd -P "$(dirname -- "$_myshellenv_src")" >/dev/null 2>&1 && pwd)"
+
+# (optional) export it if you want it visible everywhere
+export MYSHENV_WRAPPER_DIR
+
+myshellenv.manager() {
+  core="${MYSHENV_MANAGER_CORE:-$MYSHENV_WRAPPER_DIR/myshellenv.manager-core}"
+
+  if [ ! -x "$core" ]; then
+    echo "myshellenv.manager: core script not found or not executable: $core" >&2
+    return 1
+  fi
+
+  local mutating=0
+  local info=0
+
+  for arg in "$@"; do
+    case "$arg" in
+      --activate|--deactivate)
+        mutating=1
+        ;;
+      --show|--check|--list|--gen-config-template|-h|--help)
+        info=1
+        ;;
+    esac
+  done
+
+  if [ "$mutating" -eq 1 ] && [ "$info" -eq 0 ]; then
+    local out
+    out="$("$core" "$@")"
+    local status=$?
+    if [ $status -ne 0 ]; then
+      printf '%s\n' "$out"
+      return $status
+    fi
+    eval "$out"
+    return 0
+  fi
+
+  "$core" "$@"
+  return $?
+}

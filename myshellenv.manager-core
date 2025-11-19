@@ -1,0 +1,345 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import shlex
+import sys
+from textwrap import shorten
+from typing import Any, Dict, List, Optional
+
+DEFAULT_CONFIG_PATH = os.path.expanduser("~/.myshellenv.manager")
+STATE_ENV_VAR = "MYSHENV_STATE"
+
+
+class ConfigError(Exception):
+  pass
+
+
+def load_config(path: str) -> Dict[str, Any]:
+  try:
+    with open(path, "r", encoding="utf-8") as f:
+      data = json.load(f)
+  except FileNotFoundError:
+    raise ConfigError(f"Config file not found: {path}")
+  except json.JSONDecodeError as e:
+    raise ConfigError(f"Config file is not valid JSON: {path}\n{e}")
+
+  if not isinstance(data, dict) or "items" not in data or not isinstance(data["items"], dict):
+    raise ConfigError("Config must have an 'items' object mapping names to items.")
+
+  return data["items"]
+
+
+def item_to_env_map(item_def: Any) -> Dict[str, str]:
+  vals = item_def.get("values")
+  env: Dict[str, str] = {}
+
+  # Allow: "values": { "VAR": "VALUE", ... }
+  if isinstance(vals, dict):
+    for k, v in vals.items():
+      env[str(k)] = "" if v is None else str(v)
+
+  # Or: "values": [ { "VAR": "VALUE" }, { "VAR2": "VALUE2" } ]
+  elif isinstance(vals, list):
+    for entry in vals:
+      if isinstance(entry, dict):
+        for k, v in entry.items():
+          env[str(k)] = "" if v is None else str(v)
+
+  return env
+
+
+def parse_names(tokens: Optional[List[str]]) -> List[str]:
+  result: List[str] = []
+  for tok in tokens or []:
+    for part in tok.split(","):
+      name = part.strip()
+      if name:
+        result.append(name)
+  return result
+
+
+def get_state() -> Dict[str, Any]:
+  raw = os.environ.get(STATE_ENV_VAR)
+  if not raw:
+    return {}
+  try:
+    data = json.loads(raw)
+    if isinstance(data, dict):
+      return data
+  except Exception:
+    return {}
+  return {}
+
+
+def emit_state(state: Dict[str, Any]) -> str:
+  encoded = shlex.quote(json.dumps(state))
+  return f"export {STATE_ENV_VAR}={encoded}"
+
+
+def generate_exports(items: Dict[str, Any], names: List[str]) -> Dict[str, str]:
+  merged: Dict[str, str] = {}
+  for name in names:
+    item_def = items.get(name)
+    if item_def is None:
+      print(f"# WARNING: item '{name}' not found in config", file=sys.stderr)
+      continue
+    env_map = item_to_env_map(item_def)
+    # later items override earlier ones on conflicts
+    merged.update(env_map)
+  return merged
+
+
+def env_active(env_map: Dict[str, str]) -> bool:
+  """True if all variables are present and match configured values."""
+  if not env_map:
+    return False
+  for k, v in env_map.items():
+    if os.environ.get(k) != v:
+      return False
+  return True
+
+
+def diff_env(vars_expected: Dict[str, str]) -> List[str]:
+  lines: List[str] = []
+  for k, v in vars_expected.items():
+    cur = os.environ.get(k)
+    if cur == v:
+      lines.append(f"✔ {k}={v}")
+    elif cur is None:
+      lines.append(f"✖ {k} (missing, expected {v})")
+    else:
+      lines.append(f"✖ {k}={cur} (expected {v})")
+  return lines
+
+
+def print_table(items: Dict[str, Any]) -> None:
+  """
+  Print table like:
+
+  +----------------+----------+--------------------------------+
+  | Item           | Active   | Variable                       |
+  +================+==========+================================+
+  | sample_item    | yes      | VARIABLE_NAME=VALUE            |
+  |                | yes      | VARIABLE2_NAME=VALUE2          |
+  +----------------+----------+--------------------------------+
+  | sample_item2   | no       | VARIABLE3_NAME=VALUE3          |
+  +----------------+----------+--------------------------------+
+  """
+  header_line = "+----------------+----------+--------------------------------+"
+  header_sep = "+================+==========+================================+"
+
+  print(header_line)
+  print("| Item           | Active   | Variable                       |")
+  print(header_sep)
+
+  for name in sorted(items.keys()):
+    item_def = items[name]
+    env_map = item_to_env_map(item_def)
+    active_label = "yes" if env_active(env_map) else "no"
+
+    if not env_map:
+      print(f"| {name:<14} | {active_label:<8} | {'':<30} |")
+      print(header_line)
+      continue
+
+    for idx, (k, v) in enumerate(env_map.items()):
+      item_col = name if idx == 0 else ""
+      var_str = f"{k}={shorten(v, 40)}"
+      print(f"| {item_col:<14} | {active_label:<8} | {var_str:<30} |")
+
+    print(header_line)
+
+
+def print_config_template() -> None:
+  template = {
+    "items": {
+      "single_item": {
+        "values": {
+          "EXAMPLE_VAR": "VALUE"
+        }
+      },
+      "multi_item": {
+        "values": [
+          { "EXAMPLE_VAR1": "VALUE1" },
+          { "EXAMPLE_VAR2": "VALUE2" }
+        ]
+      }
+    }
+  }
+  print(json.dumps(template, indent=2))
+
+
+def build_parser() -> argparse.ArgumentParser:
+  description = (
+    "myshellenv.manager — manage named groups of environment variables.\n\n"
+    "Config file (JSON) default: ~/.myshellenv.manager\n\n"
+    "Example config:\n"
+    "{\n"
+    "  \"items\": {\n"
+    "    \"sample_item\": {\n"
+    "      \"values\": [\n"
+    "        { \"VARIABLE_NAME\": \"VARIABLE_VALUE\" },\n"
+    "        { \"VARIABLE2_NAME\": \"VARIABLE2_VALUE\" }\n"
+    "      ]\n"
+    "    },\n"
+    "    \"sample_item2\": {\n"
+    "      \"values\": { \"VARIABLE3_NAME\": \"VARIABLE3_VALUE\" }\n"
+    "    }\n"
+    "  }\n"
+    "}\n\n"
+    "To apply changes in your *current shell*, run via eval, e.g.:\n"
+    "  eval \"$(myshellenv.manager --activate sample_item,sample_item2)\"\n"
+  )
+
+  epilog = (
+    "Operations:\n"
+    "  --activate / --deactivate  Emit export/unset commands for given items.\n"
+    "  --show                     Dry run: show export commands without changing env.\n"
+    "  --check                    Compare current env to config for given items.\n"
+    "  --list                     Show a table of items, vars, and active state.\n"
+    "  --gen-config-template      Print an example config JSON and exit.\n\n"
+    "State tracking:\n"
+    f"  When used via eval with --activate/--deactivate, the script updates\n"
+    f"  {STATE_ENV_VAR}, a JSON object describing known items and their\n"
+    "  last-applied values.  --list uses the *current* environment to decide\n"
+    "  whether an item is active (all its vars match their configured values)."
+  )
+
+  parser = argparse.ArgumentParser(
+    prog="myshellenv.manager",
+    description=description,
+    epilog=epilog,
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+  )
+
+  parser.add_argument(
+    "-c",
+    "--config",
+    default=DEFAULT_CONFIG_PATH,
+    help=f"Path to config JSON file (default: {DEFAULT_CONFIG_PATH})",
+  )
+  parser.add_argument(
+    "--activate",
+    nargs="*",
+    metavar="ITEM",
+    help="Activate one or more items (names or comma-separated list).",
+  )
+  parser.add_argument(
+    "--deactivate",
+    nargs="*",
+    metavar="ITEM",
+    help="Deactivate one or more items (names or comma-separated list).",
+  )
+  parser.add_argument(
+    "--show",
+    nargs="*",
+    metavar="ITEM",
+    help="Dry run: show export commands for items without changing env.",
+  )
+  parser.add_argument(
+    "--check",
+    nargs="*",
+    metavar="ITEM",
+    help="Compare current environment vs config for the given items.",
+  )
+  parser.add_argument(
+    "--list",
+    action="store_true",
+    help="List all items, their variables, and whether they are active.",
+  )
+  parser.add_argument(
+    "--gen-config-template",
+    action="store_true",
+    help="Print an example config JSON and exit.",
+  )
+
+  return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+  parser = build_parser()
+  args = parser.parse_args(argv)
+
+  has_mutating = bool(args.activate or args.deactivate)
+  has_info = bool(args.list or args.show or args.check or args.gen_config_template)
+
+  if not has_mutating and not has_info:
+    parser.print_help()
+    return 1
+
+  # Avoid mixing env-changing ops with list/template (which are informational)
+  if has_mutating and (args.list or args.gen_config_template):
+    parser.error(
+      "Cannot combine --activate/--deactivate with --list/--gen-config-template "
+      "in a single call."
+    )
+
+  if args.gen_config_template:
+    print_config_template()
+    return 0
+
+  try:
+    items = load_config(args.config)
+  except ConfigError as e:
+    print(f"# ERROR: {e}", file=sys.stderr)
+    return 1
+
+  if args.list:
+    print_table(items)
+    return 0
+
+  # show / check: informational only (do not emit export/unset commands)
+  if args.show:
+    names = parse_names(args.show)
+    vars_expected = generate_exports(items, names)
+    print("# Dry run: these commands would be executed")
+    for k, v in vars_expected.items():
+      print(f"export {k}={shlex.quote(v)}")
+
+  if args.check:
+    names = parse_names(args.check)
+    vars_expected = generate_exports(items, names)
+    print("# Diff vs current environment")
+    for line in diff_env(vars_expected):
+      print(line)
+
+  # Mutating operations: emit shell commands for eval
+  state = get_state()
+  commands: List[str] = []
+
+  if args.activate:
+    names = parse_names(args.activate)
+    vars_to_set = generate_exports(items, names)
+    for k, v in vars_to_set.items():
+      commands.append(f"export {k}={shlex.quote(v)}")
+    # Update internal state
+    for name in names:
+      if name in items:
+        env_map = item_to_env_map(items[name])
+        if env_map:
+          state[name] = {"active": True, "vars": env_map}
+
+  if args.deactivate:
+    names = parse_names(args.deactivate)
+    vars_to_unset = generate_exports(items, names)
+    for k in vars_to_unset.keys():
+      commands.append(f"unset {k}")
+    # Update internal state (keep last known vars)
+    for name in names:
+      if name in items:
+        prev = state.get(name, {})
+        prev_vars = prev.get("vars", item_to_env_map(items[name]))
+        state[name] = {"active": False, "vars": prev_vars}
+
+  if commands:
+    # Also export updated state
+    commands.append(emit_state(state))
+    for cmd in commands:
+      print(cmd)
+
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())
