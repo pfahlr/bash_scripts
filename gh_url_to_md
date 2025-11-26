@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+import sys
+from urllib.parse import urlparse
+
+
+def format_github_line(raw_line: str) -> str | None:
+  """
+  Process a single non-comment line from the input file.
+
+  Expected format:
+    URL[|description]
+
+  Returns a formatted markdown line, the original line (if comment),
+  or None if the line should be ignored.
+  """
+  line = raw_line.rstrip("\n")
+
+  # Preserve blank lines
+  if not line.strip():
+    return ""
+
+  # Preserve comment lines exactly
+  if line.lstrip().startswith("#"):
+    return line
+
+  # Split into URL and optional description
+  if "|" in line:
+    url_part, desc_part = line.split("|", 1)
+    description = desc_part.strip()
+  else:
+    url_part = line
+    description = ""
+
+  url = url_part.strip()
+  if not url:
+    return None
+
+  parsed = urlparse(url)
+
+  # Only handle GitHub URLs
+  if parsed.scheme not in ("http", "https"):
+    return None
+  if parsed.netloc not in ("github.com", "www.github.com"):
+    return None
+
+  # Extract user/repo from path: /user/repo[/...]
+  path_parts = [p for p in parsed.path.split("/") if p]
+  if len(path_parts) < 2:
+    return None
+
+  user, repo = path_parts[0], path_parts[1]
+
+  # Build markdown bullet
+  if description:
+    return f"- [{user}/{repo}]({url}): {description}"
+  else:
+    return f"- [{user}/{repo}]({url})"
+
+
+def main() -> None:
+  if len(sys.argv) != 2:
+    print(f"Usage: {sys.argv[0]} PATH_TO_TEXTFILE", file=sys.stderr)
+    sys.exit(1)
+
+  input_path = sys.argv[1]
+
+  try:
+    with open(input_path, "r", encoding="utf-8") as f:
+      for raw_line in f:
+        formatted = format_github_line(raw_line)
+        if formatted is not None:
+          print(formatted)
+  except FileNotFoundError:
+    print(f"Error: file not found: {input_path}", file=sys.stderr)
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+  main()

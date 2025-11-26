@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+import sys
+import xml.etree.ElementTree as ET
+
+
+def extract_entries_from_xml(xml_content: str):
+  """
+  Wraps the content in a <root> tag so we can parse partial XML documents.
+  Yields dicts with text, title, xmlUrl, htmlUrl when found.
+  """
+  wrapped = f"<root>\n{xml_content}\n</root>"
+
+  try:
+    root = ET.fromstring(wrapped)
+  except ET.ParseError as e:
+    print(f"Error: failed to parse XML-ish content: {e}", file=sys.stderr)
+    sys.exit(1)
+
+  for elem in root.iter():
+    attrs = elem.attrib
+    # We care about items that look like feed outline entries
+    if "xmlUrl" in attrs and "htmlUrl" in attrs:
+      text = attrs.get("text", "").strip()
+      title = attrs.get("title", "").strip()
+      xml_url = attrs.get("xmlUrl", "").strip()
+      html_url = attrs.get("htmlUrl", "").strip()
+
+      # Skip if core URLs are missing
+      if not xml_url or not html_url:
+        continue
+
+      # Fallbacks if text/title missing
+      if not text and title:
+        text = title
+      elif not title and text:
+        title = text
+
+      # If still nothing meaningful for label, skip
+      if not text and not title:
+        continue
+
+      yield {
+        "text": text,
+        "title": title,
+        "xmlUrl": xml_url,
+        "htmlUrl": html_url,
+      }
+
+
+def main():
+  if len(sys.argv) != 2:
+    print(f"Usage: {sys.argv[0]} PATH_TO_XML_OR_FRAGMENT", file=sys.stderr)
+    sys.exit(1)
+
+  path = sys.argv[1]
+
+  try:
+    with open(path, "r", encoding="utf-8") as f:
+      content = f.read()
+  except FileNotFoundError:
+    print(f"Error: file not found: {path}", file=sys.stderr)
+    sys.exit(1)
+
+  for entry in extract_entries_from_xml(content):
+    text = entry["text"]
+    title = entry["title"]
+    html_url = entry["htmlUrl"]
+    xml_url = entry["xmlUrl"]
+
+    # If text and title are identical, don't duplicate them
+    if text == title:
+      label = text
+    else:
+      label = f"{text} - {title}"
+
+    print(f"- [{label}]({html_url}) [RSS]({xml_url})")
+
+
+if __name__ == "__main__":
+  main()
