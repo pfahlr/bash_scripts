@@ -1,0 +1,34 @@
+#!/bin/bash
+
+function print_help {
+  echo "usage: "
+  echo 'set_claude_backend <backend (claude|zai)>'
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+      --help)
+          print_help;
+          exit 0
+          ;;
+      --backend)
+          BACKEND=$2
+          shift 2
+          ;;
+      *)
+          BACKEND=$1
+          shift
+          ;;
+    esac
+done
+
+if [ $BACKEND == 'zai' ]; then
+  echo "cp ~/.claude/settings.zai.json ~/.claude/settings.json"
+  cp ~/.claude/settings.zai.json ~/.claude/settings.json
+elif [ $BACKEND == 'claude' ]; then
+  echo "cp ~/.claude/settings.claude.json ~/.claude/settings.json"
+  cp ~/.claude/settings.claude.json ~/.claude/settings.json
+else
+  echo "you did not select a backend... please specify 'claude' or 'zai' "
+fi
+
